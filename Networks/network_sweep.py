@@ -30,6 +30,11 @@ PROTOCOLS = [("dv", "DV — decoy BB84", "#1f4e9c", "-o"),
              ("cv_het", "CV — heterodyne", "#c0392b", "-s"),
              ("cv_hom", "CV — homodyne", "#7d2d8c", "--D")]
 
+# Clock rates (commercial-grade tier, per param.md): bits/s = bits/channel-use x clock.
+# DV 1 GHz (Clavis XGR), CV 100 MHz (QOSST-class). Applied per protocol so DV's
+# 10x clock advantage narrows CV's per-channel-use lead in the bits/s view.
+CLOCK = {"dv": 1e9, "cv_het": 1e8, "cv_hom": 1e8}
+
 
 def network_metrics(users, protocol):
     """Coverage and total key rate (over all pairs) for one layout."""
@@ -49,8 +54,11 @@ def main():
     p.add_argument("--n", type=int, default=20, help="Number of users (fixed)")
     p.add_argument("--runs", type=int, default=10, help="Random layouts per area")
     p.add_argument("--areas", type=float, nargs="+",
-                   default=[10, 20, 30, 40, 50, 60, 70, 80],
+                   default=[10, 20, 30, 40, 50, 60, 70, 80,90,100],
                    help="Metro area sizes (km) to sweep")
+    p.add_argument("--units", choices=["channel", "second"], default="channel",
+                   help="Rate units: 'channel' (bits/channel use) or 'second' "
+                        "(bits/s = channel x clock; DV 1 GHz, CV 100 MHz)")
     p.add_argument("--save", type=str, default=None)
     args = p.parse_args()
 
@@ -94,11 +102,13 @@ def main():
         axC.fill_between(areas, (r["cov_mean"] - r["cov_std"]) * 100,
                          (r["cov_mean"] + r["cov_std"]) * 100,
                          color=color, alpha=0.15)
-        # total-rate panel
-        axR.plot(areas, r["tot_mean"], style, color=color, label=label,
+        # total-rate panel (multiply by clock if bits/second requested)
+        mult = CLOCK[proto] if args.units == "second" else 1.0
+        axR.plot(areas, r["tot_mean"] * mult, style, color=color, label=label,
                  markersize=5)
-        axR.fill_between(areas, np.maximum(r["tot_mean"] - r["tot_std"], 1e-12),
-                         r["tot_mean"] + r["tot_std"],
+        axR.fill_between(areas,
+                         np.maximum((r["tot_mean"] - r["tot_std"]) * mult, 1e-12),
+                         (r["tot_mean"] + r["tot_std"]) * mult,
                          color=color, alpha=0.15)
 
     axC.set_xlabel("Metro area side length (km)")
@@ -109,8 +119,12 @@ def main():
     axC.legend(fontsize=10)
 
     axR.set_xlabel("Metro area side length (km)")
-    axR.set_ylabel("Total network key rate (bits / channel use)")
-    axR.set_title("Total key rate vs metro area")
+    if args.units == "second":
+        axR.set_ylabel("Total network key rate (bits / s)")
+        axR.set_title("Total key rate vs metro area\n(DV @ 1 GHz, CV @ 100 MHz)")
+    else:
+        axR.set_ylabel("Total network key rate (bits / channel use)")
+        axR.set_title("Total key rate vs metro area")
     axR.set_yscale("log")
     axR.grid(True, alpha=0.3, which="both")
     axR.legend(fontsize=10)
@@ -123,7 +137,7 @@ def main():
 
     outdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "figures")
     os.makedirs(outdir, exist_ok=True)
-    fname = args.save or f"network_sweep_N{args.n}_runs{args.runs}.png"
+    fname = args.save or f"network_sweep_N{args.n}_runs{args.runs}_{args.units}.png"
     path = os.path.join(outdir, fname)
     fig.savefig(path, dpi=200)
     print(f"\nSaved: {path}")

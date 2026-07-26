@@ -59,3 +59,131 @@ That gives each plot a clear job:
 - s5: channel noise not binding; both have margin.
 
 Two are strong findings (s2, s3), two are "this doesn't matter much" results (s4, s5) which are still worth stating, and s1 is a solid supporting comparison. That's a legitimate, honest sensitivity chapter — not every parameter has to be dramatic; showing which ones *don't* matter is part of the analysis.
+
+
+# The Equal Trusted-Node-Budget Frontier — model, usage, and thesis positioning
+
+## What this analysis is
+
+Given a budget of K trusted relay nodes, which protocol (DV decoy-BB84 or
+CV GG02 heterodyne) converts them into more network key rate — and at what
+trust-exposure cost per delivered key? Each protocol receives its OWN greedy
+allocation of the same budget, so the frontier compares each protocol's best
+use of identical resources. This is the precise novelty claim verified by the
+prior-art sweep: no prior work compares DV and CV **on a common trusted-node-
+budget axis** (do NOT claim the broader "no one has compared DV and CV on
+networks" — that is falsified by Mariani et al. 2025).
+
+## Model definition (each bullet is a defended methodological choice)
+
+- **Relays live on fibre edges** (midpoint-chain model, consistent with
+  `topo_realscale_relays.py`): r relays on an edge of length L subdivide it
+  evenly into r+1 hops of L/(r+1); the edge's effective rate is the
+  single-hop rate (bottleneck of identical hops).
+- **Greedy allocation, coverage-first lexicographic** objective
+  (coverage, then survivorship-corrected average pair rate) — the network
+  chapter's coverage-first framing applied to resource allocation.
+- **Dead-edge revival lookahead**: at backbone scale no single relay can
+  revive a 300 km edge for CV, so candidates include "spend the exact batch
+  of r relays that brings edge e under the protocol's reach", scored per
+  relay spent. During a batch, intermediate budgets hold the pre-batch state
+  (a partially subdivided dead edge delivers nothing). This prevents the
+  myopic failure mode of one-at-a-time greedy.
+- **Routing**: widest-path (max-min bottleneck) over effective edge rates;
+  ties broken by fewer trusted intermediaries. Average rate counts ALL pairs
+  with unreachable pairs as zero (survivorship correction).
+- **Trust exposure counts ALL trusted intermediaries** on the delivered
+  path: intermediate topology nodes (which relay keys in the clear under
+  the trusted-node model) plus inserted budget relays. Three metrics:
+  - `frac_exposed`: fraction of covered pairs transiting >= 1 intermediary
+  - `mean_interm`: mean intermediaries per covered pair
+  - `interm_per_bit`: rate-weighted intermediaries per delivered key bit,
+    sum(rate_p * m_p) / sum(rate_p) — the headline security-cost metric.
+- **Units**: allocations are computed once (within-protocol greedy choices
+  are invariant to constant rate scaling); bits/channel-use and bits/s
+  figures are produced from the same run via per-protocol clocks
+  (DV 1 GHz, CV 100 MHz).
+- **Engine caching**: TNO / qosst-skr are called only to build a
+  distance->rate lookup table (0.5 km grid for DV to 300 km, 0.25 km grid
+  for CV to 45 km; log-linear interpolation). The greedy search never
+  re-invokes the engines.
+
+## How to run
+
+Place `topo_relay_frontier.py` in `Networks/` alongside `topo_loader.py`
+(and with `net_common.py` importable). Then:
+
+    # primary: metro-rescaled frontier at a chosen span
+    python Networks/topo_relay_frontier.py --scale metro --span 100 --kmax 20
+
+    # spans worth running: 60 (CV mostly healthy), 100 (contested),
+    # 150 (CV coverage-limited) — the frontier story differs across them
+    python Networks/topo_relay_frontier.py --scale metro --span 150 --kmax 20
+
+    # extension: real backbone scale (revival regime)
+    python Networks/topo_relay_frontier.py --scale real --kmax 30
+
+    # subset for quick iteration
+    python Networks/topo_relay_frontier.py --scale metro --span 100 \
+        --topologies HIBERNIAUK NETRAIL --kmax 10
+
+Outputs per run: `relay_frontier_<tag>_rate_channel.png`,
+`_rate_second.png`, `_exposure.png`, `_elasticity.png`, plus summary tables
+and the decay-slope printout.
+
+Expected runtime: table build is the engine-bound part (~600 DV + ~180 CV
+calls, once per run). The greedy search itself is seconds for the five
+smaller topologies; USA100 (100 nodes) is the slow one — expect minutes,
+scale `--kmax` down first if iterating.
+
+## The elasticity mechanism (the claim that makes this a law, not a plot)
+
+A protocol's marginal gain per relay is governed by the steepness of its
+rate-distance decay: halving a hop recovers more rate for the
+faster-decaying protocol. The script prints both fitted decay slopes
+(log10 rate per km, DV over 5-150 km, CV over 5-35 km) and their ratio;
+the elasticity figure shows marginal gain per relay for both protocols.
+The testable prediction: CV's marginal gain per relay exceeds DV's roughly
+in proportion to the slope ratio, wherever both protocols are operating
+within reach. At backbone scale the picture inverts on COVERAGE: DV's ~7x
+reach advantage means each DV relay revives far more of the network per
+relay than CV's (revival cost per edge scales with ceil(L/reach) - 1).
+
+## Thesis positioning — the three nearest prior works and your delta
+
+1. **Mariani et al., arXiv:2504.02372 (2025)** — DV/CV/hybrid on trusted-
+   node complex networks. Their axis is node DENSITY and percolation; no
+   relay-count budget, no marginal-value-per-relay analysis, no quantified
+   trust metric (one qualitative sentence). Cite as nearest neighbour;
+   your delta = relay-budget axis + elasticity + trust-exposure metrics.
+2. **Karavias et al., ONDM 2025** — ILP cost comparison of PM vs EB QKD on
+   switched metro networks. Protocol-ARCHITECTURE comparison on a MONEY
+   axis; not DV-vs-CV, not trusted-node-denominated. Your delta =
+   re-denominating the budget in trusted nodes and switching the compared
+   variable to protocol family.
+3. **Selentis-Boulntadakis et al., ONDM 2025 / Makris et al.
+   arXiv:2310.17262** — relayed vs switched architectures, single-protocol
+   (DV), using rate-decay-function reasoning. Closest to "rate vs hops";
+   your delta = protocol family as the variable, plus exposure accounting.
+
+Terminology: "relay elasticity" and "equal trusted-node-budget frontier"
+appear unused in the literature — coin them, with a footnote distinguishing
+from adjacent existing terms (percolation threshold, path coverage,
+cost-per-key, bits-per-relay-use, and the qualitative marginal-trusted-node
+observation in Amer, Krawec & Wang, arXiv:2005.12404).
+
+## Caveats for the Limitations section
+
+- Greedy + revival lookahead is a heuristic, not an ILP optimum; the
+  frontier is therefore a LOWER bound on each protocol's best use of K
+  (state this; it biases neither protocol systematically).
+- Even subdivision of edges is optimal for identical hops under bottleneck
+  routing but ignores real site availability along fibre routes.
+- Intermediate topology nodes counted as trusted intermediaries assumes
+  the standard trusted-node network model (keys transit PoPs in the clear);
+  MDI/TF or zero-trust relay architectures would change the exposure
+  accounting — cite as future work.
+- Asymptotic rates, Euclidean-derived edge lengths at metro rescale, fixed
+  clock assumptions — inherited from the main study's stated limitations.
+- Rate lookup interpolation error is negligible relative to parameter
+  uncertainty, but state grid resolutions for reproducibility.

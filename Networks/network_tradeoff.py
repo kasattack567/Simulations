@@ -182,6 +182,9 @@ def main():
     p.add_argument("--kmax", type=int, default=25)
     p.add_argument("--cv", choices=["heterodyne", "homodyne"], default="heterodyne")
     p.add_argument("--reach", type=float, default=CV_REACH_KM)
+    p.add_argument("--units", choices=["channel", "second"], default="channel",
+                   help="Rate units: 'channel' (bits/channel use) or 'second' "
+                        "(bits/s; DV 1 GHz, CV 100 MHz)")
     p.add_argument("--save", type=str, default=None)
     args = p.parse_args()
 
@@ -212,18 +215,28 @@ def main():
     plt.rcParams.update({"font.family": "serif", "font.size": 12})
     fig, (axR, axK) = plt.subplots(1, 2, figsize=(15, 6))
 
-    axR.plot(areas, dv_tot, "-o", color="#1f4e9c", label="DV — decoy BB84", markersize=5)
-    axR.fill_between(areas, np.maximum(dv_tot - dv_std, 1e-12), dv_tot + dv_std,
-                     color="#1f4e9c", alpha=0.15)
-    axR.plot(areas, cv_tot, "-s", color="#c0392b",
+    # clock multipliers for bits/second (per param.md: DV 1 GHz, CV 100 MHz)
+    dv_mult = 1e9 if args.units == "second" else 1.0
+    cv_mult = 1e8 if args.units == "second" else 1.0
+
+    axR.plot(areas, dv_tot * dv_mult, "-o", color="#1f4e9c",
+             label="DV — decoy BB84", markersize=5)
+    axR.fill_between(areas, np.maximum((dv_tot - dv_std) * dv_mult, 1e-12),
+                     (dv_tot + dv_std) * dv_mult, color="#1f4e9c", alpha=0.15)
+    axR.plot(areas, cv_tot * cv_mult, "-s", color="#c0392b",
              label=f"CV — GG02 {args.cv} (relayed)", markersize=5)
-    axR.fill_between(areas, np.maximum(cv_tot - cv_std, 1e-12), cv_tot + cv_std,
-                     color="#c0392b", alpha=0.15)
+    axR.fill_between(areas, np.maximum((cv_tot - cv_std) * cv_mult, 1e-12),
+                     (cv_tot + cv_std) * cv_mult, color="#c0392b", alpha=0.15)
     axR.axvspan(10, 40, color="#7cc47f", alpha=0.12, zorder=0,
                 label="Deployed metro band")
     axR.set_xlabel("Metro area side length (km)")
-    axR.set_ylabel("Total network key rate (bits / channel use)")
-    axR.set_title("Performance: total key rate (both at 100% coverage)")
+    if args.units == "second":
+        axR.set_ylabel("Total network key rate (bits / s)")
+        axR.set_title("Performance: total key rate (both at 100% coverage)\n"
+                      "(DV @ 1 GHz, CV @ 100 MHz)")
+    else:
+        axR.set_ylabel("Total network key rate (bits / channel use)")
+        axR.set_title("Performance: total key rate (both at 100% coverage)")
     axR.set_yscale("log")
     axR.grid(True, which="both", alpha=0.3)
     axR.legend(fontsize=10)
@@ -249,7 +262,7 @@ def main():
 
     outdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "figures")
     os.makedirs(outdir, exist_ok=True)
-    fname = args.save or f"network_tradeoff_N{args.n}_{args.cv}.png"
+    fname = args.save or f"network_tradeoff_N{args.n}_{args.cv}_{args.units}.png"
     path = os.path.join(outdir, fname)
     fig.savefig(path, dpi=200)
     print(f"\nSaved: {path}")

@@ -19,14 +19,14 @@ import os
 import numpy as np
 import openpyxl
 
-# map short names -> filenames (edit if your filenames differ)
+# map short names -> filenames (edit numeric prefixes to match your Zenodo files)
 TOPOLOGY_FILES = {
-    "DARKSTRAND": "TOP_25_DARKSTRAND.xlsx",
-    "USA100":     "TOP_104_USA100.xlsx",
-    "REDIRIS":    "TOP_87_REDIRIS.xlsx",
-    "LAMBDARAIL": "TOP_60_LAMBDARAIL.xlsx",
-    "NETRAIL":    "TOP_67_NETRAIL.xlsx",
-    "HIBERNIAUK": "TOP_46_HIBERNIAUK.xlsx",
+    "TATANID":   "TOP_101_TATANID.xlsx",
+    "SAGO":      "TOP_96_SAGO.xlsx",
+    "GERMANY50": "TOP_37_GERMANY50.xlsx",
+    "CESNET":    "TOP_14_CESNET.xlsx",
+    "LAYER42":   "TOP_61_LAYER42.xlsx",
+    "RNPBRAZIL": "TOP_95_RNPBRAZIL.xlsx",
 }
 
 # folder holding the xlsx files (default: same folder as this module)
@@ -63,12 +63,19 @@ def load_topology(name, data_dir=None):
     nsheet = [s for s in wb.sheetnames if s.lower().startswith("nodes")][0]
     esheet = [s for s in wb.sheetnames if s.lower().startswith("edges")][0]
 
+    def _nid(v):
+        """Normalise node IDs to strings so int / float / str compare equal."""
+        if isinstance(v, float) and v.is_integer():
+            v = int(v)
+        return str(v)
+
     nrows = list(wb[nsheet].iter_rows(values_only=True))[1:]
     node_ids, lat, lon = [], [], []
     for r in nrows:
         if r[0] is None:
             continue
-        node_ids.append(r[0]); lat.append(float(r[1])); lon.append(float(r[2]))
+        node_ids.append(_nid(r[0]))
+        lat.append(float(r[1])); lon.append(float(r[2]))
     lat = np.array(lat); lon = np.array(lon)
     idx = {nid: k for k, nid in enumerate(node_ids)}
 
@@ -84,7 +91,7 @@ def load_topology(name, data_dir=None):
     for r in erows:
         if r[1] is None or r[2] is None:
             continue
-        s, d = r[1], r[2]
+        s, d = _nid(r[1]), _nid(r[2])
         if s in idx and d in idx:
             edges.append((idx[s], idx[d]))
             elen.append(float(r[3]) if r[3] is not None else
