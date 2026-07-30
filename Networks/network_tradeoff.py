@@ -31,7 +31,7 @@ from itertools import combinations
 import heapq
 
 from net_common import (place_users, all_pairs, pair_distance_km, link_rate,
-                        CV_REACH_KM)
+                        CV_REACH_KM, span_km)
 
 
 # ---------------- k-means (self-contained) ----------------
@@ -181,7 +181,8 @@ def main():
                    default=[10, 20, 30, 40, 50, 60, 70, 80, 90, 100])
     p.add_argument("--kmax", type=int, default=25)
     p.add_argument("--cv", choices=["heterodyne", "homodyne"], default="heterodyne")
-    p.add_argument("--reach", type=float, default=CV_REACH_KM)
+    p.add_argument("--reach", type=float, default=span_km("cv_het"),
+                   help="CV hop span, km (default: net_common sizing criterion)")
     p.add_argument("--units", choices=["channel", "second"], default="channel",
                    help="Rate units: 'channel' (bits/channel use) or 'second' "
                         "(bits/s; DV 1 GHz, CV 100 MHz)")

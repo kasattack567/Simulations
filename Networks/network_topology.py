@@ -32,11 +32,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 from itertools import combinations
 
-from net_common import link_rate, CV_REACH_KM, DV_REACH_KM
+from net_common import link_rate, span_km, CV_REACH_KM, DV_REACH_KM
 
-# per-protocol reach: DV reaches ~275 km, CV ~40 km. Using one shared reach for
+# per-protocol hop span, from the shared sizing criterion in net_common
+# (default 'rate' @ 10 Mbps: DV 65 km, CV 24 km). Using one shared reach for
 # both (the earlier bug) incorrectly killed DV links beyond 40 km.
-REACH = {"dv": DV_REACH_KM, "cv_het": CV_REACH_KM, "cv_hom": CV_REACH_KM}
+REACH = {q: span_km(q) for q in ("dv", "cv_het", "cv_hom")}
 
 
 # ============================================================
@@ -104,7 +105,7 @@ def make_mesh(n, area, seed):
 # ============================================================
 def edge_rate(pos, a, b, protocol, reach_km=None):
     """Link rate for edge (a,b) under `protocol`, using that protocol's own
-    reach (DV ~275 km, CV ~40 km). The reach_km argument is ignored — kept for
+    reach (see REACH above). The reach_km argument is ignored — kept for
     call-signature compatibility; the correct reach is looked up per protocol."""
     d = float(np.hypot(*(pos[a] - pos[b])))
     if d > REACH[protocol]:
@@ -187,7 +188,7 @@ def main():
     p.add_argument("--areas", type=float, nargs="+",
                    default=[10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200])
     p.add_argument("--cv", choices=["heterodyne", "homodyne"], default="heterodyne")
-    p.add_argument("--reach", type=float, default=CV_REACH_KM)
+    p.add_argument("--reach", type=float, default=span_km("cv_het"))
     p.add_argument("--save", type=str, default=None)
     args = p.parse_args()
 

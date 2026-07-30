@@ -1,8 +1,9 @@
 """
-Network foundation for the DV vs CV metropolitan comparison.
+Network foundation for the DV vs CV comparison on real optical backbones.
 
 Model (BB84-style, matching the peer's bb84_network.py, NOT MDI):
-  - N users placed uniformly at random in a square metro area.
+  - N users placed uniformly at random in a square area (synthetic studies only;
+    the real-topology scripts use native link lengths from TopologyBench).
   - Every user pair is a candidate DIRECT link (all N(N-1)/2 pairs).
   - Each link's key rate is the point-to-point rate at the pair's fibre distance,
     computed by the SAME corrected engines used in the point-to-point and
@@ -44,13 +45,80 @@ except ImportError as e:
 
 
 # ============================================================
-# POINT-TO-POINT THRESHOLDS (from the corrected P2P run; for annotation only)
+# POINT-TO-POINT THRESHOLDS
+# Refreshed for the Wang et al. 2019 Eq. 12 CV excess-noise model (see
+# sens_common.py). The previous values (23 / 40 / 275) came from the superseded
+# xi_bob/(T*eta) parameterisation and must not be reused.
 # ============================================================
-CROSSOVER_KM = 23.0    # CV wins (bits/channel use) below this, DV above
-CV_REACH_KM  = 40.0    # CV hits zero around here
-DV_REACH_KM  = 275.0   # DV hits zero around here
+CROSSOVER_KM = 50.0    # CV wins (bits/channel use) below this, DV above.
+                       # SOFT: 27.2 km at beta=0.90, 56.8 km at beta=0.96, so the
+                       # deployed beta band alone spans 27-57 km. Quote as a range,
+                       # not a point. This value is the beta=0.95 case.
+CV_REACH_KM  = 94.4    # CV hits zero here (agrees with the 100 km / 20 dB spec of
+                       # the LuxQuanta NOVA LQ Gen-2 commercial CV-QKD system)
+DV_REACH_KM  = 279.1   # DV hits zero here
 
-DETOUR = 1.0           # 1.0 = Euclidean (stated simplification); ~1.5 = metro fibre
+DETOUR = 1.0           # 1.0 = Euclidean (stated simplification); ~1.5 = real fibre
+
+
+# ============================================================
+# RELAY SPACING CRITERION — reach vs service rate
+# ============================================================
+# Relay spacing can be sized two ways and the choice dominates every downstream
+# trusted-node-budget result:
+#
+#   'reach' — each hop must yield a non-zero key. Maximally optimistic, and
+#             DEGENERATE for this comparison: DV's 279 km reach means it needs
+#             ZERO relays on four of the six topologies, so the CV/DV relay ratio
+#             is undefined.
+#   'rate'  — each hop must still meet a service key rate TARGET_BPS. This is what
+#             the cost model requires (c_min), it is non-degenerate, and it yields
+#             a well-defined CV/DV relay ratio of 2.5-4.0x on all six topologies.
+#
+# 'rate' is the default. Whichever is chosen must be applied to BOTH protocols.
+# Spans are hardcoded so importing this module stays fast; re-derive with
+# span_km(..., recompute=True) after any engine change.
+SPACING_CRITERION = "rate"
+TARGET_BPS = 10e6           # 10 Mbps service target (cost-model c_min)
+DV_CLOCK_HZ = 1e9           # DV symbol rate (param.md)
+CV_CLOCK_HZ = 100e6         # CV symbol rate (param.md)
+
+# (criterion, protocol) -> max hop length, km. 'rate' entries are at 10 Mbps.
+# At 1 Mbps: dv 114.9, cv_het 61.6. At 100 Mbps CV cannot meet the target at any
+# distance (cv_het 1.6 km, cv_hom 0.0 km) — CV is not a candidate for 100 Mbps.
+_SPANS = {
+    ("reach", "dv"): 279.1, ("reach", "cv_het"): 94.4, ("reach", "cv_hom"): 94.4,
+    ("rate",  "dv"):  65.0, ("rate",  "cv_het"): 23.7, ("rate",  "cv_hom"): 24.0,
+}
+
+
+def span_km(protocol, criterion=None, target_bps=None, recompute=False):
+    """Maximum hop length for `protocol` under the chosen sizing criterion.
+
+    criterion='reach' -> longest hop with any positive key.
+    criterion='rate'  -> longest hop still delivering target_bps bits/second,
+                         using that protocol's clock rate.
+    recompute=True re-derives by bisection instead of using the cached table
+    (slow; use after changing engine parameters).
+    """
+    criterion = SPACING_CRITERION if criterion is None else criterion
+    target_bps = TARGET_BPS if target_bps is None else target_bps
+    cached = (criterion == "reach") or (criterion == "rate" and target_bps == TARGET_BPS)
+    if not recompute and cached:
+        return _SPANS[(criterion, protocol)]
+
+    clock = DV_CLOCK_HZ if protocol == "dv" else CV_CLOCK_HZ
+    thresh = 1e-10 if criterion == "reach" else target_bps / clock
+    lo, hi = 0.5, 400.0
+    if link_rate(lo, protocol) < thresh:
+        return 0.0
+    for _ in range(60):
+        mid = 0.5 * (lo + hi)
+        if link_rate(mid, protocol) >= thresh:
+            lo = mid
+        else:
+            hi = mid
+    return lo
 
 
 # ============================================================
@@ -166,17 +234,21 @@ def summarise(users, protocols=("dv", "cv_het", "cv_hom")):
 # ============================================================
 # TRUSTED-NODE RELAYS — midpoint-chain rescue of failed links
 # ============================================================
-def relays_needed(L_km, reach_km=CV_REACH_KM):
-    """Number of equally-spaced relays to split a length-L link into segments
-    each < reach_km. 0 if the link already succeeds."""
-    if L_km <= reach_km:
+def relays_needed(L_km, reach_km):
+    """Number of equally-spaced relays splitting a length-L link into segments
+    each <= reach_km. 0 if the link already qualifies.
+
+    reach_km is REQUIRED and should come from span_km(protocol, criterion): it is
+    protocol-dependent, so defaulting it to CV's value (as this function used to)
+    silently applied CV's spacing to DV as well.
+    """
+    if reach_km <= 0 or L_km <= reach_km:
         return 0
     import math
-    n_segments = math.ceil(L_km / reach_km)
-    return n_segments - 1
+    return math.ceil(L_km / reach_km) - 1
 
 
-def relay_positions(users, i, j, reach_km=CV_REACH_KM):
+def relay_positions(users, i, j, reach_km):
     """(x,y) positions of the relays that evenly split link i-j into segments
     each < reach_km. Empty if none needed. Placed on the straight line."""
     L = pair_distance_km(users, i, j)
@@ -188,10 +260,11 @@ def relay_positions(users, i, j, reach_km=CV_REACH_KM):
     return [tuple(a + (b - a) * (k / (n_r + 1))) for k in range(1, n_r + 1)]
 
 
-def relayed_link_rate(users, i, j, protocol, reach_km=CV_REACH_KM):
+def relayed_link_rate(users, i, j, protocol, reach_km=None):
     """End-to-end rate of link i-j WITH midpoint-chain relays: the bottleneck
     (minimum) rate over the equal sub-segments. Returns (rate, n_relays).
     If no relays needed, returns the direct rate and 0."""
+    reach_km = span_km(protocol) if reach_km is None else reach_km
     L = pair_distance_km(users, i, j)
     n_r = relays_needed(L, reach_km)
     if n_r == 0:
@@ -201,9 +274,10 @@ def relayed_link_rate(users, i, j, protocol, reach_km=CV_REACH_KM):
     return seg_rate, n_r   # bottleneck = the (identical) segment rate
 
 
-def relayed_network(users, protocol, reach_km=CV_REACH_KM):
+def relayed_network(users, protocol, reach_km=None):
     """Apply midpoint-chain relays to every failed link. Returns a dict with
     per-pair rescued rates, total relays used, and relay positions."""
+    reach_km = span_km(protocol) if reach_km is None else reach_km
     rates, total_relays, relay_pts = {}, 0, []
     for i, j in all_pairs(len(users)):
         r, n_r = relayed_link_rate(users, i, j, protocol, reach_km)

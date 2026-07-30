@@ -1,12 +1,12 @@
 """
-Network map — DV vs CV side by side on the same metropolitan user layout.
+Network map — DV vs CV side by side on the same  user layout.
 
-Places N users uniformly at random in a square metro area, forms all direct
+Places N users uniformly at random in a square area, forms all direct
 user pairs (BB84-style, no relays), and draws TWO maps sharing the identical
 layout: one for DV, one for CV. On each map, a link is drawn only if that
 protocol yields a key over that pair's distance, and coloured by rate. The CV
 map visibly loses its longer links (CV reach ~40 km) while DV keeps them
-(DV reach ~275 km) — the core network finding, shown as a map.
+(DV reach ~279 km vs CV ~94 km) — the core network finding, shown as a map.
 
 Vary the scenario from the command line:
     python network.py --n 20 --area 30 --seed 7

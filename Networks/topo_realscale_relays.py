@@ -2,7 +2,7 @@
 Real-scale relay analysis — DV vs CV on the 6 real optical backbones.
 
 At true backbone scale (links 100s-1000s of km), neither protocol can carry most
-edges directly (DV reach ~275 km, CV ~40 km). Real trusted-node backbones solve
+edges directly. Real trusted-node backbones solve
 this by placing trusted repeater nodes ALONG each too-long fibre route. We model
 this as a MIDPOINT-CHAIN per edge: an edge of length L under a protocol of reach
 R is split into ceil(L/R) equal sub-segments by ceil(L/R)-1 evenly-spaced trusted
@@ -11,12 +11,19 @@ trusted-node backbones (e.g. Beijing-Shanghai) are actually built.
 
 With every edge relayed to viability, BOTH protocols reach 100% edge coverage, so
 we compare on two axes:
-  - COST: total trusted relays each protocol needs (DV needs far fewer; its 275 km
-          reach means only very long edges need relays, while CV's 40 km reach
-          needs relays on almost every edge).
+  - COST: total trusted relays each protocol needs.
   - PERFORMANCE: average end-to-end key rate per pair once relayed, routing across
           the topology at the bottleneck (widest-path) rate. Each relayed edge
           returns at its weakest sub-segment's rate.
+
+RELAY SIZING CRITERION (--criterion) -- this choice dominates the result:
+  reach : hops sized so each still yields any key (DV 279 km, CV 94 km). This is
+          DEGENERATE here: DV needs ZERO relays on four of the six topologies, so
+          the CV/DV relay ratio is undefined and the headline collapses.
+  rate  : hops sized so each still meets a service target (--target-bps, default
+          10 Mbps: DV 65 km, CV 24 km). Non-degenerate, matches the cost model's
+          c_min, and yields a CV/DV relay ratio of 2.5-4.0x on all six topologies.
+Default is 'rate'. The criterion is applied identically to both protocols.
 
 Headline: the relay-count gap (CV needs N x more trusted nodes than DV to light up
 the same real backbone), and whether CV's per-link rate advantage survives the
@@ -35,18 +42,21 @@ import math
 import numpy as np
 import matplotlib.pyplot as plt
 
-from net_common import link_rate, CV_REACH_KM, DV_REACH_KM
+from net_common import link_rate, span_km, SPACING_CRITERION, TARGET_BPS
 from topo_loader import TOPOLOGY_FILES, load_topology, edge_lengths
 
-REACH = {"dv": DV_REACH_KM, "cv_het": CV_REACH_KM, "cv_hom": CV_REACH_KM}
 
-
-def edge_relays_and_rate(L_km, protocol):
+def edge_relays_and_rate(L_km, protocol, criterion=None, target_bps=None):
     """For an edge of length L, return (n_relays, end_to_end_rate) under the
-    midpoint-chain model: split into ceil(L/reach) equal sub-segments; the edge
-    rate is the bottleneck (equal segments => the single segment rate)."""
-    reach = REACH[protocol]
-    if L_km <= 0:
+    midpoint-chain model: split into ceil(L/span) equal sub-segments; the edge
+    rate is the bottleneck (equal segments => the single segment rate).
+
+    The hop span comes from span_km(protocol, criterion), so it is protocol- AND
+    criterion-dependent. Excess noise is evaluated per hop (link_rate is called on
+    seg_len, not on L), which is required under Wang Eq. 12 since xi_r ~ 1/(eta*T).
+    """
+    reach = span_km(protocol, criterion, target_bps)
+    if L_km <= 0 or reach <= 0:
         return 0, 0.0
     n_seg = max(1, math.ceil(L_km / reach))
     seg_len = L_km / n_seg
@@ -71,7 +81,7 @@ def widest_paths_from(src, n, adj):
     return best
 
 
-def analyse(topo, protocol):
+def analyse(topo, protocol, criterion=None, target_bps=None):
     """Return dict: total_relays, avg_rate (all pairs), coverage, over the real
     topology with midpoint-chain relays on every edge."""
     n = len(topo["node_ids"])
@@ -80,7 +90,7 @@ def analyse(topo, protocol):
     adj = [[] for _ in range(n)]
     total_relays = 0
     for (a, b), L in zip(edges, elen):
-        nr, rate = edge_relays_and_rate(L, protocol)
+        nr, rate = edge_relays_and_rate(L, protocol, criterion, target_bps)
         total_relays += nr
         if rate > 1e-12:
             adj[a].append((b, rate)); adj[b].append((a, rate))
@@ -100,20 +110,32 @@ def analyse(topo, protocol):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--cv", choices=["heterodyne", "homodyne"], default="heterodyne")
+    p.add_argument("--criterion", choices=["reach", "rate"], default=SPACING_CRITERION,
+                   help="how to size relay spacing (default: %(default)s)")
+    p.add_argument("--target-bps", type=float, default=TARGET_BPS,
+                   help="service key rate for --criterion rate (default 10 Mbps)")
     p.add_argument("--save", type=str, default=None)
     args = p.parse_args()
     cv_proto = "cv_hom" if args.cv == "homodyne" else "cv_het"
     names = list(TOPOLOGY_FILES.keys())
 
     res = {}
-    print(f"Real-scale midpoint-chain relays. CV={args.cv}.\n")
+    spans = {q: span_km(q, args.criterion, args.target_bps)
+             for q in ("dv", cv_proto)}
+    print(f"Real-scale midpoint-chain relays. CV={args.cv}. "
+          f"criterion={args.criterion}"
+          + (f" @ {args.target_bps/1e6:g} Mbps" if args.criterion == "rate" else ""))
+    print(f"  hop span: DV {spans['dv']:.1f} km, CV {spans[cv_proto]:.1f} km\n")
+    if args.criterion == "reach":
+        print("  [warn] 'reach' sizing is degenerate: DV needs 0 relays on most\n"
+              "         topologies, so the CV/DV ratio is undefined. Use 'rate'.\n")
     print(f"{'Topology':12} {'nodes':>5} {'edges':>5} "
           f"{'DV relays':>9} {'CV relays':>9} {'ratio':>6} "
           f"{'DV rate':>10} {'CV rate':>10}")
     for name in names:
         topo = load_topology(name)
-        dv = analyse(topo, "dv")
-        cv = analyse(topo, cv_proto)
+        dv = analyse(topo, "dv", args.criterion, args.target_bps)
+        cv = analyse(topo, cv_proto, args.criterion, args.target_bps)
         res[name] = (dv, cv)
         ratio = cv["total_relays"] / dv["total_relays"] if dv["total_relays"] else float("inf")
         print(f"{name:12} {dv['n']:5d} {dv['n_edges']:5d} "

@@ -54,7 +54,7 @@ def main():
     p.add_argument("--n", type=int, default=20, help="Number of users (fixed)")
     p.add_argument("--runs", type=int, default=10, help="Random layouts per area")
     p.add_argument("--areas", type=float, nargs="+",
-                   default=[10, 20, 30, 40, 50, 60, 70, 80,90,100],
+                   default=[10, 50,100, 150, 200, 250],
                    help="Metro area sizes (km) to sweep")
     p.add_argument("--units", choices=["channel", "second"], default="channel",
                    help="Rate units: 'channel' (bits/channel use) or 'second' "

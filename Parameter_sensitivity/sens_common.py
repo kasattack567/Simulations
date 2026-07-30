@@ -13,6 +13,18 @@ one output. There is no run-to-run variance, so these plots carry NO error bars
 DV RECONCILIATION: TNO's asymptotic BB84 hardcodes error correction at the
 Shannon limit (beta=1). DV_BETA<1 is applied post-hoc by scaling the EC cost,
 exactly as in cv_hetro.py.
+
+CV EXCESS NOISE — Wang et al., Opt. Express 27, 13372 (2019), Sec. 5, Eq. 12:
+    xi_r(T) = (eps_a + eps_l) + eps_b / (eta * T)
+referred to the channel input. eps_b (Bob-side measurement noise) arises AFTER
+the channel and so does not attenuate; referred to the input it is amplified by
+1/(eta*T). This replaces the earlier single-parameter xi_bob/(T*eta) form, which
+had no constant channel floor and an eps_b ~30x too large (it implied 2.5 SNU
+input-referred at 100 km, against ~0.098 SNU measured in Wang Table 2).
+
+CONSEQUENCE FOR THESE SWEEPS: eta and alpha now enter TWICE for CV — once through
+detection, once through xi_r. That coupling is physical and intended, but it means
+the CV curves in s1 and s3 are steeper than under the old constant-xi model.
 """
 import os
 import numpy as np
@@ -31,7 +43,11 @@ from tno.quantum.communication.qkd_key_rate.quantum.bb84 import (
 # ============================================================
 # LOCKED BASELINE (must match cv_hetro.py / param.md section 0)
 # ============================================================
-L_KM = 20.0                # sensitivity test distance (near crossover)
+# Sensitivity test distance. Chosen to sit near the DV/CV crossover so that both
+# protocols are competitive and the sweeps are informative. The crossover moved
+# from ~23 km to 50.6 km when the CV noise model changed to Wang Eq. 12, so this
+# moved with it. Override per-run with --distance.
+L_KM = 50.0
 ALPHA_DB_KM = 0.20
 
 DV_EFFICIENCY = 0.65
@@ -41,10 +57,16 @@ DV_BETA       = 0.95       # matched to CV; applied post-hoc (engine is ideal)
 
 CV_ETA    = 0.60
 CV_VEL    = 0.10
-CV_XI_BOB = 0.01
 CV_BETA   = 0.95
 
-VA_LO, VA_HI = 1e-2, 100.0  # unconstrained (matches cv_hetro.py)
+# CV excess noise, Wang Eq. 12 (channel-input referred). Calibrated by Wang
+# against their measured prototype (Table 2 / Fig. 8).
+CV_XI_AL  = 0.005     # eps_a + eps_l: Alice + fibre channel (SNU)
+CV_XI_B   = 0.0005    # eps_b: Bob-side measurement noise (SNU)
+
+# Va capped at 10 SNU per param.md (deployed modulator headroom). Does not affect
+# any result beyond ~20 km; below that the uncapped optimum was unphysical.
+VA_LO, VA_HI = 1e-2, 10.0
 
 DARK_CPS_TO_PERGATE = 1e-9  # 100 cps @ 1 GHz, ~1 ns window -> 1e-7 per gate
 
@@ -56,22 +78,29 @@ def T_of_L(L_km, alpha=ALPHA_DB_KM):
     return 10**(-alpha * L_km / 10.0)
 
 
-def _cv_xi_input(T, xi_bob, eta):
-    return xi_bob / (T * eta)
+def cv_xi_input(T, eta=None, xi_al=None, xi_b=None):
+    """Channel-input-referred CV excess noise, Wang et al. 2019 Eq. 12."""
+    eta = CV_ETA if eta is None else eta
+    xi_al = CV_XI_AL if xi_al is None else xi_al
+    xi_b = CV_XI_B if xi_b is None else xi_b
+    return xi_al + xi_b / (eta * T)
 
 
-def cv_rate(L_km=L_KM, eta=None, vel=None, xi_bob=None, beta=None, alpha=None,
-            detection="heterodyne"):
-    """CV bits/symbol, Va optimised. detection='heterodyne' or 'homodyne'."""
+def cv_rate(L_km=L_KM, eta=None, vel=None, xi_al=None, xi_b=None, beta=None,
+            alpha=None, detection="heterodyne"):
+    """CV bits/symbol, Va optimised. detection='heterodyne' or 'homodyne'.
+
+    Excess noise follows Wang Eq. 12; sweep it via xi_b (Bob-side, carries the
+    distance scaling) and/or xi_al (constant Alice+fibre floor).
+    """
     eta = CV_ETA if eta is None else eta
     vel = CV_VEL if vel is None else vel
-    xi_bob = CV_XI_BOB if xi_bob is None else xi_bob
     beta = CV_BETA if beta is None else beta
     alpha = ALPHA_DB_KM if alpha is None else alpha
     T = T_of_L(L_km, alpha)
     if T < 1e-12:
         return 0.0
-    xi = _cv_xi_input(T, xi_bob, eta)
+    xi = cv_xi_input(T, eta=eta, xi_al=xi_al, xi_b=xi_b)
     skr_fn = (GaussianTrustedHomodyneAsymptotic.skr if detection == "homodyne"
               else GaussianTrustedHeterodyneAsymptotic.skr)
 
@@ -182,10 +211,17 @@ def _save_or_show(fig, output_dir, fname):
 # SHARED-AXIS PLOT (parameter identical for both protocols)
 # ============================================================
 def shared_plot(x, dv, cv, xlabel, title, fname,
-                band=None, band_label=None, bands=None, logx=False, output_dir=None):
+                band=None, band_label=None, bands=None, logx=False, output_dir=None,
+                labels=('DV — decoy BB84', 'CV — GG02 heterodyne'),
+                colors=(DV_COLOR, CV_COLOR), markers=('-o', '-s'),
+                legend_loc='best'):
     """Shared x-axis (parameter identical for both protocols).
     Pass a single band via (band, band_label), or multiple via
     bands=[((lo,hi), color, label), ...]. Crossings here ARE meaningful.
+
+    labels/colors/markers are overridable so this helper can also plot two curves
+    that are NOT one-DV-one-CV (e.g. CV heterodyne vs CV homodyne in s6). Leaving
+    them at the defaults while passing non-DV data mislabels the figure.
     """
     fig, ax = plt.subplots(figsize=(8, 5.5))
     handles = []
@@ -199,8 +235,8 @@ def shared_plot(x, dv, cv, xlabel, title, fname,
         ax.axvline(lo, color=color, ls=':', lw=1.0, alpha=0.8, zorder=1)
         ax.axvline(hi, color=color, ls=':', lw=1.0, alpha=0.8, zorder=1)
         handles.append(sp)
-    h_dv, = ax.plot(x, dv, '-o', color=DV_COLOR, label='DV — decoy BB84')
-    h_cv, = ax.plot(x, cv, '-s', color=CV_COLOR, label='CV — GG02 heterodyne')
+    h_dv, = ax.plot(x, dv, markers[0], color=colors[0], label=labels[0])
+    h_cv, = ax.plot(x, cv, markers[1], color=colors[1], label=labels[1])
     handles += [h_dv, h_cv]
     if logx:
         ax.set_xscale('log')
@@ -210,7 +246,7 @@ def shared_plot(x, dv, cv, xlabel, title, fname,
     ax.grid(True, which='both', alpha=0.25, linewidth=0.6)
     ax.set_axisbelow(True)
     ax.set_title(title, pad=10)
-    ax.legend(handles=handles, loc='best', framealpha=0.92, edgecolor='0.7')
+    ax.legend(handles=handles, loc=legend_loc, framealpha=0.92, edgecolor='0.7')
     fig.tight_layout()
     _save_or_show(fig, output_dir, fname)
 
@@ -274,7 +310,7 @@ def twin_plot(xdv, dv, xcv, cv, xl_dv, xl_cv, title, fname,
 
 
 def shared_plot3(x, dv, cv_het, cv_hom, xlabel, title, fname,
-                 bands=None, logx=False, output_dir=None):
+                 bands=None, logx=False, output_dir=None, legend_loc='best'):
     """Shared x-axis with three curves: DV, CV heterodyne, CV homodyne.
     Used where the parameter is identical for all (beta, alpha, detector eff)."""
     fig, ax = plt.subplots(figsize=(8, 5.5))
@@ -297,14 +333,14 @@ def shared_plot3(x, dv, cv_het, cv_hom, xlabel, title, fname,
     ax.grid(True, which='both', alpha=0.25, linewidth=0.6)
     ax.set_axisbelow(True)
     ax.set_title(title, pad=10)
-    ax.legend(handles=handles, loc='best', framealpha=0.92, edgecolor='0.7')
+    ax.legend(handles=handles, loc=legend_loc, framealpha=0.92, edgecolor='0.7')
     fig.tight_layout()
     _save_or_show(fig, output_dir, fname)
 
 
 def twin_plot3(xdv, dv, xcv, cv_het, cv_hom, xl_dv, xl_cv, title, fname,
                band_dv=None, band_cv=None, band_dv_label=None, band_cv_label=None,
-               logx_dv=False, output_dir=None):
+               logx_dv=False, output_dir=None, legend_loc='best'):
     """Twin x-axes: DV (bottom) vs CV het+hom (top). Crossings not meaningful."""
     fig, ax = plt.subplots(figsize=(8, 5.5))
     axt = ax.twiny()
@@ -336,7 +372,7 @@ def twin_plot3(xdv, dv, xcv, cv_het, cv_hom, xl_dv, xl_cv, title, fname,
     ax.grid(True, which='both', alpha=0.25, linewidth=0.6)
     ax.set_axisbelow(True)
     ax.set_title(title, pad=22)
-    ax.legend(handles=handles, loc='best', framealpha=0.92, edgecolor='0.7')
+    ax.legend(handles=handles, loc=legend_loc, framealpha=0.92, edgecolor='0.7')
     ax.text(0.5, -0.18,
             "Note: DV and CV use separate x-axes — curve crossings are not physically meaningful.",
             transform=ax.transAxes, ha='center', va='top',
@@ -345,13 +381,20 @@ def twin_plot3(xdv, dv, xcv, cv_het, cv_hom, xl_dv, xl_cv, title, fname,
     _save_or_show(fig, output_dir, fname)
 
 
-def arg_output_dir():
-    """Tiny shared CLI: optional --output-dir PATH (save) else interactive."""
+def arg_common():
+    """Shared CLI: --output-dir PATH (save; omit to show) and --distance KM."""
     import argparse
     p = argparse.ArgumentParser()
     p.add_argument("--output-dir", type=str, default=None,
                    help="Directory to save the figure (omit to show interactively)")
-    return p.parse_args().output_dir
+    p.add_argument("--distance", type=float, default=L_KM,
+                   help=f"Test distance in km (default {L_KM:.0f}, near the crossover)")
+    return p.parse_args()
+
+
+def arg_output_dir():
+    """Back-compat shim for callers that only need the output directory."""
+    return arg_common().output_dir
 
 
 # ============================================================
@@ -380,8 +423,12 @@ def arg_output_dir():
 #                      hi: Boston metro WSi/NbN ~1000 cps (arXiv:1708.00434)
 #  CV v_el  0.05-0.11  lo: best balanced homodyne ~0.05 (arXiv:1006.4216)
 #                      hi: deployed field BPD 0.11 SNU (npj QI 2025, s41534-025-01060-7)
-#  CV xi    0.01-0.03  lo: 5G fronthaul 13.2km field 0.0146 (arXiv:2104.04360)
-#                      hi: commercial-fibre field tests ~0.03 (Zhang field)
+#  CV eps_b 5e-4-2e-3 lo: Wang 2019 prototype calibration; also reproduces the
+#                          LuxQuanta NOVA LQ Gen-2 spec (100 km / 20 dB)
+#                      hi: pessimistic deployed (reach ~69 km)
+#                      NB total input-referred xi_r follows Eq. 12 and is
+#                          distance-dependent; measured values run 0.005 SNU at
+#                          0 km to ~0.098 SNU at 100 km (Wang Table 2)
 #  DV QBER  0.5-2.1%   lo: Swedish field SNSPD link 0.5% (arXiv:2606.06107)
 #                      hi: same trial InGaAs detector 2.1% (arXiv:2606.06107)
 #
@@ -398,10 +445,20 @@ RANGES = dict(
     dv_dark = np.logspace(0, 5, N),          # 1-1e5 cps; deployed 1-1000 is a slice
     cv_vel  = np.linspace(0.00, 0.50, N),    # deployed 0.05-0.11 is a slice
     dv_qber = np.linspace(0.001, 0.11, N),   # to ~11% cutoff; deployed 0.5-2.1% is a slice
-    cv_xi   = np.linspace(0.001, 0.08, N),   # channel-only; deployed 0.001-0.02 is a slice
+    # Wang Eq. 12 decomposition. eps_b is the term that carries the distance
+    # scaling (amplified by 1/(eta*T) at the channel input), so it is the
+    # informative sensitivity axis; eps_a+eps_l is a constant floor.
+    cv_xi_b  = np.linspace(1e-4, 5e-3, N),   # Bob-side (SNU); deployed 5e-4-2e-3
+    cv_xi_al = np.linspace(0.0, 0.02, N),    # Alice+fibre floor (SNU)
 )
 BAND = dict(
     dv_eta=(0.65, 0.93), cv_eta=(0.60, 0.72), beta=(0.90, 0.96),
     alpha=(0.091, 0.20), dv_dark=(1, 1000), cv_vel=(0.05, 0.11),
-    dv_qber=(0.005, 0.021), cv_xi=(0.001, 0.02),
+    dv_qber=(0.005, 0.021),
+    # eps_b lo: Wang 2019 calibration to their prototype (5e-4), which also
+    # reproduces the 100 km / 20 dB reach of the LuxQuanta NOVA LQ Gen-2
+    # commercial CV-QKD system. hi: 2e-3, a more pessimistic deployed figure
+    # (reach ~69 km). Reach at the lo/hi ends: 94 km / 69 km.
+    cv_xi_b=(5e-4, 2e-3),
+    cv_xi_al=(0.003, 0.008),
 )

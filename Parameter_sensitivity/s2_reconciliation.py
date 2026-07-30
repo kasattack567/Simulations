@@ -18,5 +18,5 @@ shared_plot3(b, dv, cv_het, cv_hom,
              'Reconciliation efficiency  $\\beta$',
              f'Key rate vs reconciliation efficiency   ($L = {L_KM:.0f}$ km)',
              's2_reconciliation.png',
-             bands=[(BAND['beta'], BAND_SH, 'Deployed $\\beta$ (0.90–0.96)')],
+             bands=[(BAND['beta'], BAND_SH, 'Deployed $\\beta$ (0.90-0.96)')],
              output_dir=arg_output_dir())
