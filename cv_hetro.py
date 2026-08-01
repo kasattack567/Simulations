@@ -84,7 +84,7 @@ DV_CLOCK_HZ       = 1e9     # 1 GHz, typical modern DV system
 CV_CLOCK_HZ       = 100e6   # 100 MHz, representative deployed CV symbol rate
 
 # Distance range
-DISTANCES_KM = np.arange(0, 321, 1)
+DISTANCES_KM = np.arange(0, 321, 0.5)
 
 # Plotting floor for bits/channel-use (Figure 2). Rates below this are treated as
 # no key and simply not drawn, so the DV tail is visible out to its cutoff.
@@ -320,6 +320,58 @@ ax2.grid(True, alpha=0.3, which='both')
 plt.tight_layout()
 plt.savefig('figure2_bits_per_channel_use.png', dpi=150, bbox_inches='tight')
 print("Saved: figure2_bits_per_channel_use.png")
+
+# ============================================================
+# FIGURE 3: bits per second at EQUAL clock rates (1 GHz)
+# ============================================================
+fig3, ax3 = plt.subplots(figsize=(9, 6))
+
+EQUAL_CLOCK_HZ = 1e9
+
+dv_equal_bps     = dv_rates * EQUAL_CLOCK_HZ
+cv_het_equal_bps = cv_het_rates * EQUAL_CLOCK_HZ
+cv_hom_equal_bps = cv_hom_rates * EQUAL_CLOCK_HZ
+
+mask_dv3 = dv_equal_bps > 1
+ax3.semilogy(
+    DISTANCES_KM[mask_dv3],
+    dv_equal_bps[mask_dv3],
+    'b-',
+    linewidth=2.5,
+    label='DV: Decoy BB84 @ 1 GHz'
+)
+
+mask_het3 = cv_het_equal_bps > 1
+ax3.semilogy(
+    DISTANCES_KM[mask_het3],
+    cv_het_equal_bps[mask_het3],
+    'r-',
+    linewidth=2.5,
+    label='CV: GG02 Heterodyne @ 1 GHz'
+)
+
+mask_hom3 = cv_hom_equal_bps > 1
+ax3.semilogy(
+    DISTANCES_KM[mask_hom3],
+    cv_hom_equal_bps[mask_hom3],
+    'm--',
+    linewidth=2.5,
+    label='CV: GG02 Homodyne @ 1 GHz'
+)
+
+ax3.set_xlabel('Distance (km)', fontsize=12)
+ax3.set_ylabel('Secret key rate (bits/s)', fontsize=12)
+ax3.set_title('DV vs CV — Equal Clock Rate (1 GHz)', fontsize=12)
+
+ax3.set_xlim(0, 320)
+ax3.set_ylim(1e0, 1e10)
+
+ax3.legend(fontsize=10, loc='lower left')
+ax3.grid(True, alpha=0.3, which='both')
+
+plt.tight_layout()
+plt.savefig('figure3_equal_clock_1GHz.png', dpi=150, bbox_inches='tight')
+print("Saved: figure3_equal_clock_1GHz.png")
 
 
 # ============================================================

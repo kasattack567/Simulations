@@ -8,7 +8,9 @@ shape, while eps_b steepens the roll-off and sets the reach. Separating them is
 the point of the decomposition, so both deserve a sweep. There is no DV analogue
 of a distance-independent channel-noise floor, so this is a CV-only figure.
 
-Deterministic engines -> no error bars.
+Deterministic engines -> no error bars. Both curves are CV, so kinds=('cv','cv')
+is passed: otherwise the first curve would be scaled at the DV clock in the
+deployed-clock panel.
 """
 import numpy as np
 from sens_common import (cv_rate, cv_xi_input, T_of_L, shared_plot, arg_common,
@@ -37,4 +39,5 @@ shared_plot(xa, cv_het, cv_hom,
             band=BAND['cv_xi_al'], band_label='Deployed floor (0.003–0.008 SNU)',
             labels=('CV — GG02 heterodyne', 'CV — GG02 homodyne'),
             colors=(CV_COLOR, '#7d2d8c'), markers=('-s', '--D'),
+            kinds=('cv', 'cv'),   # BOTH curves are CV -> both scale at the CV clock
             legend_loc='upper right', output_dir=args.output_dir)

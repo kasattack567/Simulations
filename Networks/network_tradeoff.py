@@ -1,7 +1,7 @@
 """
 Cost-performance tradeoff — DV vs CV once relays give BOTH full coverage.
 
-Builds on the min-K result: at each metro area size, place the MINIMUM number of
+Builds on the min-K result: at each area size, place the MINIMUM number of
 trusted relays that bring CV to 100% coverage (k-means placement, dedicated
 relays, users are not transit hops). With both protocols now at full coverage,
 coverage is no longer the differentiator, so we compare on RATE, with the relay
@@ -13,8 +13,8 @@ relayed pairs are exactly the long ones whose hops sit near CV's reach limit, so
 they return at LOW rate. This is computed honestly here (max-min routing), not
 assumed.
 
-Two panels vs metro area:
-  (left)  total network key rate: DV (all direct) vs CV (direct + relayed)
+Two panels vs area:
+  (left)  total network key rate in BITS/S: DV (all direct) vs CV (direct + relayed)
   (right) minimum trusted relays CV needs (DV needs zero)
 
 Together: "CV delivers X total rate for N trusted nodes; DV delivers Y for none."
@@ -31,7 +31,7 @@ from itertools import combinations
 import heapq
 
 from net_common import (place_users, all_pairs, pair_distance_km, link_rate,
-                        CV_REACH_KM, span_km)
+                        CV_REACH_KM, span_km, to_bps, is_reachable)
 
 
 # ---------------- k-means (self-contained) ----------------
@@ -125,7 +125,7 @@ def relayed_pair_rate(i, j, users, relays, protocol, reach_km):
         d = np.hypot(*(coords[a] - coords[b]))
         if d <= reach_km:
             r = link_rate(d, protocol)
-            if r > 1e-12:
+            if is_reachable(r, protocol):
                 adj[a].append((b, r)); adj[b].append((a, r))
     # i,j to relays
     for rid in relay_ids:
@@ -158,19 +158,20 @@ def relayed_pair_rate(i, j, users, relays, protocol, reach_km):
 
 
 def network_total_relayed(users, relays, protocol, reach_km):
-    """Total end-to-end key rate over all user pairs, with relay routing."""
+    """Total end-to-end key rate in BITS/S over all user pairs, with relay
+    routing. Summed per channel use, converted once at the protocol's clock."""
     total = 0.0
     for i, j in combinations(range(len(users)), 2):
         total += relayed_pair_rate(i, j, users, relays, protocol, reach_km)
-    return total
+    return to_bps(total, protocol)
 
 
 def dv_total_direct(users, reach_km):
-    """DV total over all pairs (direct; DV reaches all metro pairs anyway)."""
+    """DV total in BITS/S over all pairs (direct; DV reaches all pairs)."""
     total = 0.0
     for i, j in all_pairs(len(users)):
         total += link_rate(pair_distance_km(users, i, j), "dv")
-    return total
+    return to_bps(total, "dv")
 
 
 def main():
@@ -183,9 +184,6 @@ def main():
     p.add_argument("--cv", choices=["heterodyne", "homodyne"], default="heterodyne")
     p.add_argument("--reach", type=float, default=span_km("cv_het"),
                    help="CV hop span, km (default: net_common sizing criterion)")
-    p.add_argument("--units", choices=["channel", "second"], default="channel",
-                   help="Rate units: 'channel' (bits/channel use) or 'second' "
-                        "(bits/s; DV 1 GHz, CV 100 MHz)")
     p.add_argument("--save", type=str, default=None)
     args = p.parse_args()
 
@@ -216,28 +214,20 @@ def main():
     plt.rcParams.update({"font.family": "serif", "font.size": 12})
     fig, (axR, axK) = plt.subplots(1, 2, figsize=(15, 6))
 
-    # clock multipliers for bits/second (per param.md: DV 1 GHz, CV 100 MHz)
-    dv_mult = 1e9 if args.units == "second" else 1.0
-    cv_mult = 1e8 if args.units == "second" else 1.0
-
-    axR.plot(areas, dv_tot * dv_mult, "-o", color="#1f4e9c",
+    # Rates are already bits/s (converted in the total_* functions above).
+    axR.plot(areas, dv_tot, "-o", color="#1f4e9c",
              label="DV — decoy BB84", markersize=5)
-    axR.fill_between(areas, np.maximum((dv_tot - dv_std) * dv_mult, 1e-12),
-                     (dv_tot + dv_std) * dv_mult, color="#1f4e9c", alpha=0.15)
-    axR.plot(areas, cv_tot * cv_mult, "-s", color="#c0392b",
+    axR.fill_between(areas, np.maximum(dv_tot - dv_std, 1e-12),
+                     dv_tot + dv_std, color="#1f4e9c", alpha=0.15)
+    axR.plot(areas, cv_tot, "-s", color="#c0392b",
              label=f"CV — GG02 {args.cv} (relayed)", markersize=5)
-    axR.fill_between(areas, np.maximum((cv_tot - cv_std) * cv_mult, 1e-12),
-                     (cv_tot + cv_std) * cv_mult, color="#c0392b", alpha=0.15)
+    axR.fill_between(areas, np.maximum(cv_tot - cv_std, 1e-12),
+                     cv_tot + cv_std, color="#c0392b", alpha=0.15)
     axR.axvspan(10, 40, color="#7cc47f", alpha=0.12, zorder=0,
-                label="Deployed metro band")
-    axR.set_xlabel("Metro area side length (km)")
-    if args.units == "second":
-        axR.set_ylabel("Total network key rate (bits / s)")
-        axR.set_title("Performance: total key rate (both at 100% coverage)\n"
-                      "(DV @ 1 GHz, CV @ 100 MHz)")
-    else:
-        axR.set_ylabel("Total network key rate (bits / channel use)")
-        axR.set_title("Performance: total key rate (both at 100% coverage)")
+                label="Deployed area band")
+    axR.set_xlabel("Area side length (km)")
+    axR.set_ylabel("Total network key rate (bits / s)")
+    axR.set_title("Performance: total key rate (both at 100% coverage)")
     axR.set_yscale("log")
     axR.grid(True, which="both", alpha=0.3)
     axR.legend(fontsize=10)
@@ -249,7 +239,7 @@ def main():
     axK.fill_between(areas, np.maximum(k_mean - k_std, 0), k_mean + k_std,
                      color="#c0392b", alpha=0.15)
     axK.axvspan(10, 40, color="#7cc47f", alpha=0.12, zorder=0)
-    axK.set_xlabel("Metro area side length (km)")
+    axK.set_xlabel("Area side length (km)")
     axK.set_ylabel("Minimum trusted relays for full coverage")
     axK.set_title("Cost: trusted nodes CV requires")
     axK.grid(True, alpha=0.3)
@@ -263,7 +253,7 @@ def main():
 
     outdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "figures")
     os.makedirs(outdir, exist_ok=True)
-    fname = args.save or f"network_tradeoff_N{args.n}_{args.cv}_{args.units}.png"
+    fname = args.save or f"network_tradeoff_N{args.n}_{args.cv}_bps.png"
     path = os.path.join(outdir, fname)
     fig.savefig(path, dpi=200)
     print(f"\nSaved: {path}")

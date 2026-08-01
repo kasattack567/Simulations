@@ -1,5 +1,5 @@
 """
-Network sweep — how DV and CV perform as the metro area grows.
+Network sweep — how DV and CV perform as the area grows.
 
 For each area size (10..80 km, 10 km steps), generate SWEEP_RUNS random user
 layouts (fixed N users), compute each layout's network metrics, and average.
@@ -9,7 +9,7 @@ point-to-point / sensitivity plots, which have no randomness and no error bars.
 
 Two panels:
   (left)  coverage  = fraction of user pairs that can share a key
-  (right) total key rate = sum of direct-link rates over ALL pairs
+  (right) total key rate in BITS/S = sum of direct-link rates over ALL pairs
                             (failed links contribute zero — no survivorship bias)
 
 Curves: DV, CV-heterodyne, CV-homodyne. Direct links only (no relays).
@@ -24,29 +24,31 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 
-from net_common import place_users, all_pairs, pair_distance_km, link_rate
+from net_common import (place_users, all_pairs, pair_distance_km, link_rate,
+                        to_bps, is_reachable, REACHABLE_BPS)
 
 PROTOCOLS = [("dv", "DV — decoy BB84", "#1f4e9c", "-o"),
              ("cv_het", "CV — heterodyne", "#c0392b", "-s"),
              ("cv_hom", "CV — homodyne", "#7d2d8c", "--D")]
 
-# Clock rates (commercial-grade tier, per param.md): bits/s = bits/channel-use x clock.
-# DV 1 GHz (Clavis XGR), CV 100 MHz (QOSST-class). Applied per protocol so DV's
-# 10x clock advantage narrows CV's per-channel-use lead in the bits/s view.
-CLOCK = {"dv": 1e9, "cv_het": 1e8, "cv_hom": 1e8}
+# OUTPUT UNITS: bits/s throughout. Clocks come from net_common (single source of
+# truth) and are MATCHED at 1 GHz for DV and CV. The old --units flag is gone:
+# with matched clocks the bits/channel-use view is this figure rescaled by a
+# single common factor, so it carried no information the bits/s view lacks.
+# Run with QKD_CV_CLOCK_HZ=100e6 for the deployed-clock version.
 
 
 def network_metrics(users, protocol):
-    """Coverage and total key rate (over all pairs) for one layout."""
+    """Coverage and total key rate in BITS/S (over all pairs) for one layout."""
     n = len(users)
     n_pairs = n * (n - 1) // 2
     total, connected = 0.0, 0
     for i, j in all_pairs(n):
         r = link_rate(pair_distance_km(users, i, j), protocol)
-        if r > 1e-9:
+        if is_reachable(r, protocol):
             total += r
             connected += 1
-    return connected / n_pairs, total   # coverage, total rate
+    return connected / n_pairs, to_bps(total, protocol)   # coverage, bits/s
 
 
 def main():
@@ -55,10 +57,7 @@ def main():
     p.add_argument("--runs", type=int, default=10, help="Random layouts per area")
     p.add_argument("--areas", type=float, nargs="+",
                    default=[10, 50,100, 150, 200, 250],
-                   help="Metro area sizes (km) to sweep")
-    p.add_argument("--units", choices=["channel", "second"], default="channel",
-                   help="Rate units: 'channel' (bits/channel use) or 'second' "
-                        "(bits/s = channel x clock; DV 1 GHz, CV 100 MHz)")
+                   help="Area sizes (km) to sweep")
     p.add_argument("--save", type=str, default=None)
     args = p.parse_args()
 
@@ -102,42 +101,37 @@ def main():
         axC.fill_between(areas, (r["cov_mean"] - r["cov_std"]) * 100,
                          (r["cov_mean"] + r["cov_std"]) * 100,
                          color=color, alpha=0.15)
-        # total-rate panel (multiply by clock if bits/second requested)
-        mult = CLOCK[proto] if args.units == "second" else 1.0
-        axR.plot(areas, r["tot_mean"] * mult, style, color=color, label=label,
+        # total-rate panel — already in bits/s (converted in network_metrics)
+        axR.plot(areas, r["tot_mean"], style, color=color, label=label,
                  markersize=5)
         axR.fill_between(areas,
-                         np.maximum((r["tot_mean"] - r["tot_std"]) * mult, 1e-12),
-                         (r["tot_mean"] + r["tot_std"]) * mult,
+                         np.maximum(r["tot_mean"] - r["tot_std"], 1e-12),
+                         r["tot_mean"] + r["tot_std"],
                          color=color, alpha=0.15)
 
-    axC.set_xlabel("Metro area side length (km)")
-    axC.set_ylabel("Coverage (% of user pairs with a key)")
-    axC.set_title("Network coverage vs metro area")
+    axC.set_xlabel("Area side length (km)")
+    axC.set_ylabel(f"Coverage (% of pairs at $\\geq$ {REACHABLE_BPS/1e3:g} kbit/s)")
+    axC.set_title("Network coverage vs area")
     axC.set_ylim(0, 105)
     axC.grid(True, alpha=0.3)
     axC.legend(fontsize=10)
 
-    axR.set_xlabel("Metro area side length (km)")
-    if args.units == "second":
-        axR.set_ylabel("Total network key rate (bits / s)")
-        axR.set_title("Total key rate vs metro area\n(DV @ 1 GHz, CV @ 100 MHz)")
-    else:
-        axR.set_ylabel("Total network key rate (bits / channel use)")
-        axR.set_title("Total key rate vs metro area")
+    axR.set_xlabel("Area side length (km)")
+    axR.set_ylabel("Total network key rate (bits / s)")
+    axR.set_title("Total key rate vs area")
     axR.set_yscale("log")
     axR.grid(True, alpha=0.3, which="both")
     axR.legend(fontsize=10)
 
     fig.suptitle(
-        f"DV vs CV over random metro networks   "
+        f"DV vs CV over random networks   "
         f"(N={args.n} users, {args.runs} layouts/area, direct links)",
         fontsize=14, weight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.96])
 
     outdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "figures")
     os.makedirs(outdir, exist_ok=True)
-    fname = args.save or f"network_sweep_N{args.n}_runs{args.runs}_{args.units}.png"
+    fname = args.save or f"network_sweep_N{args.n}_runs{args.runs}_bps.png"
     path = os.path.join(outdir, fname)
     fig.savefig(path, dpi=200)
     print(f"\nSaved: {path}")

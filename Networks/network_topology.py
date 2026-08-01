@@ -32,12 +32,21 @@ import numpy as np
 import matplotlib.pyplot as plt
 from itertools import combinations
 
-from net_common import link_rate, span_km, CV_REACH_KM, DV_REACH_KM
+from net_common import (link_rate, to_bps, is_reachable, REACHABLE_BPS,
+                        CV_REACH_KM, DV_REACH_KM)
 
-# per-protocol hop span, from the shared sizing criterion in net_common
-# (default 'rate' @ 10 Mbps: DV 65 km, CV 24 km). Using one shared reach for
-# both (the earlier bug) incorrectly killed DV links beyond 40 km.
-REACH = {q: span_km(q) for q in ("dv", "cv_het", "cv_hom")}
+# NOTE ON EDGE VIABILITY. This script places NO relays: it measures how far each
+# protocol's *unaided* reach carries a topology. There is therefore no artificial
+# reach cutoff — link_rate() already returns exactly 0.0 beyond a protocol's
+# reach, so the physics decides. (Gating edges with a relay-SPACING span, e.g.
+# net_common.span_km(..., 'rate'), would be wrong here: that quantity answers
+# "how far apart may relays sit", not "does this edge carry a key at all", and
+# would kill DV edges beyond 65 km that in fact work out to 279 km.)
+#
+# For a service-provisioning view instead of a connectivity view, use --min-rate:
+# an edge is then viable only if it meets that rate, and "coverage" reads as
+# "% of pairs meeting the service target" rather than "% of pairs with any key".
+REACH = {"dv": DV_REACH_KM, "cv_het": CV_REACH_KM, "cv_hom": CV_REACH_KM}
 
 
 # ============================================================
@@ -103,14 +112,20 @@ def make_mesh(n, area, seed):
 # ============================================================
 # ROUTING — average key rate per pair over the topology
 # ============================================================
-def edge_rate(pos, a, b, protocol, reach_km=None):
-    """Link rate for edge (a,b) under `protocol`, using that protocol's own
-    reach (see REACH above). The reach_km argument is ignored — kept for
-    call-signature compatibility; the correct reach is looked up per protocol."""
+def edge_rate(pos, a, b, protocol, min_rate=0.0):
+    """Link rate for edge (a,b) under `protocol`, in BITS/S.
+
+    No artificial reach cutoff: link_rate() is already exactly 0.0 beyond a
+    protocol's reach. `min_rate` is a service threshold in BITS/S (it used to be
+    in bits/channel use — the units changed with the switch to a bits/s output,
+    so any --min-rate value from an earlier run must be rescaled by the clock).
+    A positive min_rate turns coverage into "% of pairs meeting the target"."""
     d = float(np.hypot(*(pos[a] - pos[b])))
-    if d > REACH[protocol]:
+    r_ch = link_rate(d, protocol)
+    if not is_reachable(r_ch, protocol):
         return 0.0
-    return link_rate(d, protocol)
+    r = to_bps(r_ch, protocol)
+    return r if r >= min_rate else 0.0
 
 
 def widest_paths_from(src, n, adj):
@@ -131,14 +146,14 @@ def widest_paths_from(src, n, adj):
     return best
 
 
-def avg_rate_per_pair(pos, edges, protocol, reach_km):
+def avg_rate_per_pair(pos, edges, protocol, min_rate=0.0):
     """Average end-to-end key rate over ALL user pairs (unreachable = 0),
     routing along the topology edges with bottleneck (widest-path) rates."""
     n = len(pos)
     adj = [[] for _ in range(n)]
     for a, b in edges:
-        r = edge_rate(pos, a, b, protocol, reach_km)
-        if r > 1e-12:
+        r = edge_rate(pos, a, b, protocol, min_rate)
+        if r > 0.0:      # edge_rate already returns 0.0 below the floor
             adj[a].append((b, r)); adj[b].append((a, r))
     total = 0.0
     n_pairs = n * (n - 1) // 2
@@ -150,14 +165,14 @@ def avg_rate_per_pair(pos, edges, protocol, reach_km):
     return total / n_pairs if n_pairs else 0.0
 
 
-def rate_and_coverage(pos, edges, protocol, reach_km):
+def rate_and_coverage(pos, edges, protocol, min_rate=0.0):
     """Return (avg_rate_over_all_pairs, coverage_fraction).
     A pair is 'covered' if a routed path connects it (bottleneck rate > 0)."""
     n = len(pos)
     adj = [[] for _ in range(n)]
     for a, b in edges:
-        r = edge_rate(pos, a, b, protocol, reach_km)
-        if r > 1e-12:
+        r = edge_rate(pos, a, b, protocol, min_rate)
+        if r > 0.0:      # edge_rate already returns 0.0 below the floor
             adj[a].append((b, r)); adj[b].append((a, r))
     total = 0.0
     connected = 0
@@ -186,9 +201,12 @@ def main():
     p.add_argument("--runs", type=int, default=5,
                    help="Layouts averaged (mesh is random; ring/star/tree fixed)")
     p.add_argument("--areas", type=float, nargs="+",
-                   default=[10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200])
+                   default=[10, 50, 100, 150, 175, 200, 250, 300, 350, 400])
     p.add_argument("--cv", choices=["heterodyne", "homodyne"], default="heterodyne")
-    p.add_argument("--reach", type=float, default=span_km("cv_het"))
+    p.add_argument("--min-rate", type=float, default=0.0,
+                   help="EXTRA service threshold in bits/s, on top of the "
+                        "net_common reachability floor. 0 (default) = the floor "
+                        "alone.")
     p.add_argument("--save", type=str, default=None)
     args = p.parse_args()
 
@@ -198,8 +216,14 @@ def main():
     plt.rcParams.update({"font.family": "serif", "font.size": 10})
     # 2 rows (rate, coverage) x 4 cols (topologies)
     fig, axes = plt.subplots(2, 4, figsize=(20, 9), sharex=True)
+    # dotted vertical + "-> 0" in the top row marks where a protocol's average
+    # rate becomes exactly zero (no connected pairs), which a log axis cannot show.
 
-    print(f"N={args.n} nodes, CV={args.cv}, reach {args.reach:.0f} km\n")
+    view = (f"connectivity (>= {REACHABLE_BPS:g} bits/s floor)"
+            if args.min_rate <= 0
+            else f"service (>= {args.min_rate:g} bits/s)")
+    print(f"N={args.n} nodes, CV={args.cv}. Reach: DV {DV_REACH_KM:.0f} km, "
+          f"CV {CV_REACH_KM:.0f} km. View: {view}\n")
     for col, (tname, builder) in enumerate(TOPOS):
         ax_rate = axes[0, col]
         ax_cov = axes[1, col]
@@ -212,8 +236,8 @@ def main():
                     pos, edges = builder(args.n, area, seed=r)
                 else:
                     pos, edges = builder(args.n, area)
-                a_dv, c_dv = rate_and_coverage(pos, edges, "dv", args.reach)
-                a_cv, c_cv = rate_and_coverage(pos, edges, cv_proto, args.reach)
+                a_dv, c_dv = rate_and_coverage(pos, edges, "dv", args.min_rate)
+                a_cv, c_cv = rate_and_coverage(pos, edges, cv_proto, args.min_rate)
                 dvr.append(a_dv); cvr.append(a_cv); dvc.append(c_dv); cvc.append(c_cv)
             dv_r.append(np.mean(dvr)); cv_r.append(np.mean(cvr))
             dv_c.append(np.mean(dvc)); cv_c.append(np.mean(cvc))
@@ -221,23 +245,33 @@ def main():
         dv_c, cv_c = np.array(dv_c), np.array(cv_c)
 
         # --- rate panel (top) ---
-        # guard against all-zero (log scale) by masking zeros
-        def _plot_rate(ax, x, y, **kw):
+        # A rate of exactly 0 cannot be drawn on a log axis, so a curve that
+        # reaches zero simply STOPS. That reads as missing data when it actually
+        # means "no connected pairs". Mark the extinction point explicitly.
+        def _plot_rate(ax, x, y, color, **kw):
             y = np.array(y, float)
             mask = y > 0
-            ax.plot(x[mask], y[mask], **kw)
-        _plot_rate(ax_rate, areas, dv_r, marker="o", ls="-", color="#1f4e9c",
+            ax.plot(x[mask], y[mask], color=color, **kw)
+            if mask.any() and not mask.all():
+                i = int(np.where(mask)[0][-1])       # last surviving point
+                if i + 1 < len(x):
+                    ax.axvline(x[i + 1], color=color, ls=":", lw=1.4, alpha=0.8,
+                               zorder=1)
+                    ax.annotate("→ 0", xy=(x[i + 1], y[mask][-1]),
+                                xytext=(4, 0), textcoords="offset points",
+                                color=color, fontsize=8, va="center")
+        _plot_rate(ax_rate, areas, dv_r, "#1f4e9c", marker="o", ls="-",
                    label="DV — decoy BB84", ms=5)
-        _plot_rate(ax_rate, areas, cv_r, marker="s", ls="-", color="#c0392b",
+        _plot_rate(ax_rate, areas, cv_r, "#c0392b", marker="s", ls="-",
                    label=f"CV — {args.cv}", ms=5)
         ax_rate.axvspan(10, 40, color="#7cc47f", alpha=0.12, zorder=0,
-                        label="Deployed metro")
+                        label="Metro-scale span")
         ax_rate.set_yscale("log")
         ax_rate.set_title(f"{tname}", fontsize=13, weight="bold")
         ax_rate.grid(True, which="both", alpha=0.3)
         if col == 0:
-            ax_rate.set_ylabel("Avg key rate per pair\n(bits / channel use)")
-        ax_rate.legend(fontsize=8)
+            ax_rate.set_ylabel("Average key rate per pair\n(bits / s)")
+        ax_rate.legend(fontsize=8, loc="lower left")
 
         # --- coverage panel (bottom) ---
         # DV drawn dashed + thicker so it stays visible where it overlaps CV at 100%
@@ -251,7 +285,7 @@ def main():
         ax_cov.set_xlabel("Area side (km)")
         if col == 0:
             ax_cov.set_ylabel("Coverage\n(% of pairs connected)")
-        ax_cov.legend(fontsize=8)
+        ax_cov.legend(fontsize=8, loc="center right")
 
         print(f"{tname:5s}: CV rate {cv_r[0]:.2e}->{cv_r[-1]:.2e}  "
               f"cov {cv_c[0]*100:.0f}%->{cv_c[-1]*100:.0f}%   "

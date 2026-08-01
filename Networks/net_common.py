@@ -54,6 +54,10 @@ CROSSOVER_KM = 50.0    # CV wins (bits/channel use) below this, DV above.
                        # SOFT: 27.2 km at beta=0.90, 56.8 km at beta=0.96, so the
                        # deployed beta band alone spans 27-57 km. Quote as a range,
                        # not a point. This value is the beta=0.95 case.
+# NB these are ZERO-RATE distances: the point at which the key rate reaches
+# zero. They are NOT the usable reach under the 1 kbit/s reachability floor —
+# for that use span_km(protocol, 'reach'), which is shorter. Kept for reference
+# and for the plotting/annotation call sites that want the asymptotic limit.
 CV_REACH_KM  = 94.4    # CV hits zero here (agrees with the 100 km / 20 dB spec of
                        # the LuxQuanta NOVA LQ Gen-2 commercial CV-QKD system)
 DV_REACH_KM  = 279.1   # DV hits zero here
@@ -62,55 +66,127 @@ DETOUR = 1.0           # 1.0 = Euclidean (stated simplification); ~1.5 = real fi
 
 
 # ============================================================
-# RELAY SPACING CRITERION — reach vs service rate
+# RELAY SPACING CRITERION — floor vs service rate
 # ============================================================
 # Relay spacing can be sized two ways and the choice dominates every downstream
-# trusted-node-budget result:
+# trusted-node-budget result. Both are derived by bisection against a bits/s
+# goal, so both are CLOCK-DEPENDENT (threshold = goal / clock):
 #
-#   'reach' — each hop must yield a non-zero key. Maximally optimistic, and
-#             DEGENERATE for this comparison: DV's 279 km reach means it needs
-#             ZERO relays on four of the six topologies, so the CV/DV relay ratio
-#             is undefined.
-#   'rate'  — each hop must still meet a service key rate TARGET_BPS. This is what
-#             the cost model requires (c_min), it is non-degenerate, and it yields
-#             a well-defined CV/DV relay ratio of 2.5-4.0x on all six topologies.
+#   'reach' — each hop must clear the reachability floor, REACHABLE_BPS
+#             (1 kbit/s). "Relay only where the link would otherwise fail."
+#             This is the sizing the relay-count comparison wants, because it
+#             lets each protocol's reach show through.
+#   'rate'  — each hop must meet a service key rate, TARGET_BPS (10 Mbps), as
+#             the cost model requires (c_min). Note what this does to a DV/CV
+#             comparison: with matched clocks both protocols face the same
+#             per-channel-use threshold, and 10 Mbps sits near the rate at which
+#             the two curves cross, so the spans land a few km apart and the
+#             relay counts come out nearly equal — not because the protocols are
+#             equally capable at distance, but because the criterion never looks
+#             at the region where they differ. Use it for costing, not for reach.
 #
-# 'rate' is the default. Whichever is chosen must be applied to BOTH protocols.
-# Spans are hardcoded so importing this module stays fast; re-derive with
-# span_km(..., recompute=True) after any engine change.
-SPACING_CRITERION = "rate"
+# Whichever is chosen must be applied to BOTH protocols.
+SPACING_CRITERION = "reach"   # floor-sized; see above
 TARGET_BPS = 10e6           # 10 Mbps service target (cost-model c_min)
-DV_CLOCK_HZ = 1e9           # DV symbol rate (param.md)
-CV_CLOCK_HZ = 100e6         # CV symbol rate (param.md)
 
-# (criterion, protocol) -> max hop length, km. 'rate' entries are at 10 Mbps.
-# At 1 Mbps: dv 114.9, cv_het 61.6. At 100 Mbps CV cannot meet the target at any
-# distance (cv_het 1.6 km, cv_hom 0.0 km) — CV is not a candidate for 100 Mbps.
-_SPANS = {
-    ("reach", "dv"): 279.1, ("reach", "cv_het"): 94.4, ("reach", "cv_hom"): 94.4,
-    ("rate",  "dv"):  65.0, ("rate",  "cv_het"): 23.7, ("rate",  "cv_hom"): 24.0,
-}
+
+# ============================================================
+# CLOCK RATES — bits/channel use -> bits/s. SINGLE SOURCE OF TRUTH.
+# ============================================================
+# MATCHED CLOCK: DV and CV are both run at 1 GHz. This is the like-for-like
+# protocol-physics view — any DV/CV separation in a bits/s figure is then
+# intrinsic to the protocols, not to the electronics.
+#
+# It is NOT the deployed view. Fielded CV symbol rates are ~100 MHz (DAC/ADC, DSP
+# chain and shot-noise-limited receiver bandwidth), so a matched-clock figure
+# credits CV with a decade of headroom it does not currently have. Say which view
+# a figure uses; CLOCK_LABEL below is provided for exactly that.
+#
+# Every downstream script imports these rather than defining its own, so the two
+# views cannot drift apart again. Switch back per run without editing code:
+#     QKD_CV_CLOCK_HZ=100e6 python topo_direct.py
+DV_CLOCK_HZ = float(os.environ.get("QKD_DV_CLOCK_HZ", 1e9))
+CV_CLOCK_HZ = float(os.environ.get("QKD_CV_CLOCK_HZ", 1e9))   # matched (was 100e6)
+CV_CLOCK_DEPLOYED_HZ = 100e6   # fielded CV symbol rate, kept for reference
+
+CLOCK_HZ = {"dv": DV_CLOCK_HZ, "cv_het": CV_CLOCK_HZ, "cv_hom": CV_CLOCK_HZ}
+
+
+def clock_hz(protocol):
+    """Repetition rate (Hz) for `protocol`; use this instead of a local table."""
+    try:
+        return CLOCK_HZ[protocol]
+    except KeyError:
+        raise ValueError(f"unknown protocol {protocol!r}")
+
+
+def to_bps(rate, protocol):
+    """bits/channel use -> bits/s at `protocol`'s clock.
+
+    Every script that reports a rate goes through this, so no module multiplies
+    by a clock of its own. Accepts a scalar or an array.
+    """
+    clock = clock_hz(protocol)
+    if np.isscalar(rate):
+        return float(rate) * clock
+    return np.asarray(rate, dtype=float) * clock
+
+
+def _fmt_hz(f):
+    return f"{f/1e9:g} GHz" if f >= 1e9 else f"{f/1e6:g} MHz"
+
+
+CLOCK_MATCHED = (DV_CLOCK_HZ == CV_CLOCK_HZ)
+CLOCK_LABEL = (f"DV {_fmt_hz(DV_CLOCK_HZ)}, CV {_fmt_hz(CV_CLOCK_HZ)}"
+               + (" — matched" if CLOCK_MATCHED else ""))
+
+
+# HOP SPANS. Both criteria are now derived by bisection against a rate floor,
+# because a span must be consistent with the reachability test applied to the
+# resulting hop — otherwise relays get placed at a spacing whose segments then
+# fail is_reachable, and the script reports full coverage while leaving dead
+# edges in the graph. That was the case while 'reach' returned DV_REACH_KM /
+# CV_REACH_KM (279.1 / 94.4 km): those are ZERO-RATE distances, and a hop of
+# that length carries no usable key.
+#
+#   'reach' -> longest hop still clearing REACHABLE_BPS (the reachability floor,
+#              1 kbit/s). "Relay only where the link would otherwise fail."
+#   'rate'  -> longest hop still clearing TARGET_BPS (a service level, 10 Mbps).
+#              For costing a network at a usable rate.
+#
+# So the two differ only in the target; 'reach' is the floor-sized case. Spans
+# are memoised per (criterion, protocol, target, clock). Import stays fast; the
+# first call costs one bisection per protocol.
+#
+# CONSEQUENCE: relay counts move with REACHABLE_BPS as well as with the clock.
+# Any previously quoted CV/DV relay ratio must be re-derived, not reused.
+_SPAN_CACHE = {}
 
 
 def span_km(protocol, criterion=None, target_bps=None, recompute=False):
     """Maximum hop length for `protocol` under the chosen sizing criterion.
 
-    criterion='reach' -> longest hop with any positive key.
-    criterion='rate'  -> longest hop still delivering target_bps bits/second,
-                         using that protocol's clock rate.
-    recompute=True re-derives by bisection instead of using the cached table
-    (slow; use after changing engine parameters).
+    criterion='reach' -> longest hop still clearing the reachability floor
+                         (REACHABLE_BPS). Use this for "relay only where the
+                         link would otherwise fail".
+    criterion='rate'  -> longest hop still delivering target_bps bits/second at
+                         that protocol's clock (a service level, for costing).
+    Both are clock-dependent, since the threshold is bits/s divided by clock.
+    recompute=True forces re-derivation by bisection, ignoring the memo.
     """
     criterion = SPACING_CRITERION if criterion is None else criterion
     target_bps = TARGET_BPS if target_bps is None else target_bps
-    cached = (criterion == "reach") or (criterion == "rate" and target_bps == TARGET_BPS)
-    if not recompute and cached:
-        return _SPANS[(criterion, protocol)]
+    # 'reach' is sized at the reachability floor, 'rate' at the service target.
+    goal_bps = REACHABLE_BPS if criterion == "reach" else target_bps
+    thresh = goal_bps / clock_hz(protocol)
 
-    clock = DV_CLOCK_HZ if protocol == "dv" else CV_CLOCK_HZ
-    thresh = 1e-10 if criterion == "reach" else target_bps / clock
+    key = (criterion, protocol, goal_bps, clock_hz(protocol))
+    if not recompute and key in _SPAN_CACHE:
+        return _SPAN_CACHE[key]
+
     lo, hi = 0.5, 400.0
     if link_rate(lo, protocol) < thresh:
+        _SPAN_CACHE[key] = 0.0
         return 0.0
     for _ in range(60):
         mid = 0.5 * (lo + hi)
@@ -118,6 +194,7 @@ def span_km(protocol, criterion=None, target_bps=None, recompute=False):
             lo = mid
         else:
             hi = mid
+    _SPAN_CACHE[key] = lo
     return lo
 
 
@@ -184,27 +261,95 @@ def pair_rates(users, protocol):
 
 
 # ============================================================
-# NETWORK METRICS
+# REACHABILITY — the single definition of "this link carries a key"
 # ============================================================
-POSITIVE = 1e-9   # a pair "connects" if its rate exceeds this
+# A link/pair counts as REACHABLE if its secret key rate is at least
+# REACHABLE_BPS bits per second. One definition, used by every script, so that
+# coverage figures across the suite mean the same thing.
+#
+# WHY 1 kbps, AND NOT ZERO. The engines are asymptotic: they return a positive
+# rate right down to the rate-distance limit, including rates of a few bits per
+# second that no finite-size analysis would certify and no operator would field.
+# A non-zero floor is therefore the honest reading of "works". 1 kbps sits below
+# every deployed system found in the literature, so it cannot be accused of
+# defining working links out of existence, while excluding rates that exist only
+# in the asymptotic limit:
+#
+#   - Deployed backbone. On China's CN-QCN backbone, across the 64 links between
+#     Harbin and Shenzhen, the lowest secure key rate measured over ten weeks was
+#     9.75 kbps and the highest 359.89 kbps (Nature npj QI 11, 2025). Our floor
+#     is an order of magnitude below the weakest carrier-grade link.
+#   - Deployed metro. The Tokyo QKD network's links ran between 2.8 and 141 kbps,
+#     with one commercial SARG04 link peaking at 1.5 kbps; the Shanghai CV metro
+#     network ran 0.25-10 kbps (ACM CSUR 53, 2020).
+#   - Application demand. A 100 Gbps quantum-safe IPsec deployment over 46 km
+#     sustained 45 days on an average 7.4 kbps, about 29 AES-256 keys per second
+#     (arXiv:2405.04415); a data-centre interconnect trial ran on 2.392 kbps
+#     (arXiv:2410.10245). At 1 kbps a fresh 256-bit key is available roughly four
+#     times a second, so the floor still supports frequent rekeying.
+#   - Finite-size theory. No secret key can be extracted from fewer than about
+#     10^5-10^6 processed signals per run (Scarani, arXiv:1010.0521), and Wang
+#     et al. (Opt. Express 27, 13372, 2019) show the finite-size rate-distance
+#     limit is far tighter than the asymptotic one — roughly 200 km against 500
+#     km even at 10^12 samples. Our engines model none of this, so a rate floor
+#     stands in, approximately, for a penalty the calculation omits.
+#
+# ASYMMETRY, AND ITS SIZE. Any positive floor costs DV more than CV, because
+# under Wang Eq. 12 the referred excess noise carries a 1/(eta*T) term: near its
+# limit CV's rate falls through several decades within about a kilometre, while
+# DV's tail decays gently. But the effect is small. Measured, the floor moves
+# DV's usable reach from 279.1 km (zero-rate) to about 265 km — roughly 5%. Do
+# not present it as a large correction; if anything it is reassuring, since the
+# conclusions then do not hinge on where the floor is set. Verify the CV figure
+# on the real engines before quoting it. Sensitivity runs:
+#     QKD_REACHABLE_BPS=256  ... one AES-256 key per second
+#     QKD_REACHABLE_BPS=1e3  ... default
+#     QKD_REACHABLE_BPS=1e4  ... carrier-grade deployed floor
+REACHABLE_BPS = float(os.environ.get("QKD_REACHABLE_BPS", 1e3))
 
-def coverage(rates):
-    """Fraction of pairs achieving a positive key rate."""
+
+def reachable_threshold(protocol):
+    """The REACHABLE_BPS floor expressed in bits per channel use, for the
+    protocol's clock. Compare raw engine output against this."""
+    return REACHABLE_BPS / clock_hz(protocol)
+
+
+def is_reachable(rate, protocol, units="channel"):
+    """True if `rate` clears the reachability floor.
+
+    units='channel' (default) for raw engine output in bits per channel use;
+    units='second' if the rate has already been converted with to_bps.
+    Accepts a scalar or an array; returns a bool or a boolean array.
+    """
+    thresh = REACHABLE_BPS if units == "second" else reachable_threshold(protocol)
+    if np.isscalar(rate):
+        return float(rate) >= thresh
+    return np.asarray(rate, dtype=float) >= thresh
+
+
+# Retained so older call sites keep working; prefer is_reachable(). Note this is
+# a bits/channel-use quantity and assumes the DV clock.
+POSITIVE = REACHABLE_BPS / DV_CLOCK_HZ
+
+
+def coverage(rates, protocol="dv"):
+    """Fraction of pairs clearing the reachability floor. `rates` in bits per
+    channel use. Pass ALL pairs, not just the connected ones."""
     if len(rates) == 0:
         return 0.0
-    return float(np.mean(np.asarray(rates) > POSITIVE))
+    return float(np.mean(is_reachable(rates, protocol)))
 
 
-def aggregate_rate(rates):
-    """Sum of positive key rates across all pairs (bits/channel use)."""
+def aggregate_rate(rates, protocol="dv"):
+    """Sum of reachable key rates across all pairs (bits/channel use)."""
     r = np.asarray(rates)
-    return float(r[r > POSITIVE].sum())
+    return float(r[is_reachable(r, protocol)].sum())
 
 
-def rate_stats(rates):
-    """Summary of the achievable-rate distribution over connected pairs."""
+def rate_stats(rates, protocol="dv"):
+    """Summary of the achievable-rate distribution over reachable pairs."""
     r = np.asarray(rates)
-    live = r[r > POSITIVE]
+    live = r[is_reachable(r, protocol)]
     if len(live) == 0:
         return dict(n_connected=0, mean=0.0, median=0.0, min=0.0, max=0.0)
     return dict(
@@ -224,9 +369,9 @@ def summarise(users, protocols=("dv", "cv_het", "cv_hom")):
     for p in protocols:
         dists, rates = pair_rates(users, p)
         out[p] = {
-            "coverage": coverage(rates),
-            "aggregate": aggregate_rate(rates),
-            **rate_stats(rates),
+            "coverage": coverage(rates, p),
+            "aggregate": aggregate_rate(rates, p),
+            **rate_stats(rates, p),
         }
     return out
 
@@ -281,9 +426,9 @@ def relayed_network(users, protocol, reach_km=None):
     rates, total_relays, relay_pts = {}, 0, []
     for i, j in all_pairs(len(users)):
         r, n_r = relayed_link_rate(users, i, j, protocol, reach_km)
-        if r > POSITIVE:
+        if is_reachable(r, protocol):
             rates[(i, j)] = r
-        if n_r > 0 and r > POSITIVE:
+        if n_r > 0 and is_reachable(r, protocol):
             total_relays += n_r
             relay_pts.extend(relay_positions(users, i, j, reach_km))
     return dict(rates=rates, total_relays=total_relays, relay_pts=relay_pts)

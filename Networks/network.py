@@ -27,8 +27,13 @@ import matplotlib.colors as mcolors
 import networkx as nx
 
 from net_common import (place_users, all_pairs, pair_distance_km,
-                        link_rate, coverage, CV_REACH_KM, DV_REACH_KM,
-                        CROSSOVER_KM, relayed_network, POSITIVE)
+                        link_rate, to_bps, is_reachable, REACHABLE_BPS,
+                        CV_REACH_KM, DV_REACH_KM, CROSSOVER_KM, relayed_network)
+
+# UNITS: every rate on this figure — edge colours, colourbar, metrics table and
+# the printed summary — is in BITS/S, converted with to_bps at the protocol's
+# clock (DV and CV matched at 1 GHz). Viability is decided by net_common's
+# single reachability floor (REACHABLE_BPS), applied via is_reachable.
 
 USER_C = "#333333"
 RELAY_C = "#ff7f0e"   # trusted-node relays
@@ -43,11 +48,12 @@ def build_graph(users, protocol):
     rates, dists = {}, {}
     for i, j in all_pairs(len(users)):
         d = pair_distance_km(users, i, j)
-        r = link_rate(d, protocol)
+        r = link_rate(d, protocol)          # bits/channel use — viability test
         dists[(i, j)] = d
-        if r > 1e-9:
-            G.add_edge(i, j, rate=r)
-            rates[(i, j)] = r
+        if is_reachable(r, protocol):
+            r_bps = to_bps(r, protocol)     # stored and plotted in bits/s
+            G.add_edge(i, j, rate=r_bps)
+            rates[(i, j)] = r_bps
     return G, nx.get_node_attributes(G, "pos"), rates, dists
 
 
@@ -72,8 +78,11 @@ def draw_map(ax, users, protocol, title, vmin, vmax):
     ax.tick_params(left=True, bottom=True, labelleft=True, labelbottom=True)
     ax.set_axis_on()
 
-    cov = coverage(np.array(list(rates.values()) or [0.0]))
+    # coverage = reachable pairs / ALL pairs. (This previously called
+    # net_common.coverage on the surviving links only, which is the fraction of
+    # connected links that are connected — always 1.0.)
     n_conn = len(rates)
+    cov = n_conn / n_pairs if n_pairs else 0.0
     rvals = np.array(list(rates.values())) if rates else np.array([])
     metrics = dict(
         success_rate=cov,                                   # fraction of pairs with a key
@@ -97,7 +106,8 @@ def draw_map_relayed(ax, users, protocol, title, vmin, vmax, reach_km):
     """Like draw_map but rescues failed links with midpoint-chain relays,
     drawing the relays and split links. Returns metrics incl. relay count."""
     net = relayed_network(users, protocol, reach_km)
-    rates = net["rates"]
+    # relayed_network returns bits/channel use; convert to bits/s to match draw_map
+    rates = {k: to_bps(v, protocol) for k, v in net["rates"].items()}
     relay_pts = net["relay_pts"]
     n = len(users)
     n_pairs = n * (n - 1) // 2
@@ -165,12 +175,12 @@ def main():
     for proto in ("dv", cv_proto):
         for i, j in all_pairs(args.n):
             r = link_rate(pair_distance_km(users, i, j), proto)
-            if r > 1e-9:
-                all_rates.append(r)
+            if is_reachable(r, proto):
+                all_rates.append(to_bps(r, proto))
     if all_rates:
         vmin, vmax = min(all_rates), max(all_rates)
     else:
-        vmin, vmax = 1e-6, 1.0
+        vmin, vmax = 1e3, 1e9
 
     plt.rcParams.update({"font.family": "serif", "font.size": 12})
     fig = plt.figure(figsize=(18, 11))
@@ -197,7 +207,7 @@ def main():
                            cmap="viridis")
     sm.set_array([])
     cbar = fig.colorbar(sm, cax=cax)
-    cbar.set_label("Link key rate (bits / channel use)")
+    cbar.set_label("Link key rate (bits / s)")
 
     # network geometry (same for both)
     dists = np.array([pair_distance_km(users, i, j)
@@ -218,15 +228,15 @@ def main():
     cell_rows = [
         ["Reachable pairs", f"{statsDV['n_connected']}", f"{statsCV['n_connected']}"],
         ["Reachability", f"{statsDV['success_rate']*100:.0f}%", f"{statsCV['success_rate']*100:.0f}%"],
-        ["Avg rate (all pairs)", fmt(statsDV['avg_key_rate'], True), fmt(statsCV['avg_key_rate'], True)],
-        ["Min rate (connected)", fmt(statsDV['min_key_rate'], True), fmt(statsCV['min_key_rate'], True)],
-        ["Max rate (connected)", fmt(statsDV['max_key_rate'], True), fmt(statsCV['max_key_rate'], True)],
-        ["Total key rate", fmt(statsDV['total_key_rate'], True), fmt(statsCV['total_key_rate'], True)],
+        ["Avg rate, all pairs (bit/s)", fmt(statsDV['avg_key_rate'], True), fmt(statsCV['avg_key_rate'], True)],
+        ["Min rate, connected (bit/s)", fmt(statsDV['min_key_rate'], True), fmt(statsCV['min_key_rate'], True)],
+        ["Max rate, connected (bit/s)", fmt(statsDV['max_key_rate'], True), fmt(statsCV['max_key_rate'], True)],
+        ["Total key rate (bit/s)", fmt(statsDV['total_key_rate'], True), fmt(statsCV['total_key_rate'], True)],
         ["Trusted relays", "0", f"{statsCV.get('total_relays', 0)}"],
     ]
     tbl = axT.table(cellText=cell_rows, colLabels=col_labels,
                     cellLoc="center", colLoc="center", loc="center",
-                    colWidths=[0.22, 0.20, 0.20])
+                    colWidths=[0.26, 0.20, 0.20])
     tbl.auto_set_font_size(False)
     tbl.set_fontsize(11)
     tbl.scale(1, 1.5)
@@ -249,8 +259,8 @@ def main():
 
     print(f"\n{'metric':<16}{'DV':>14}{'CV':>14}")
     for label, key, e in [("reachability", "success_rate", False),
-                          ("avg key rate", "avg_key_rate", True),
-                          ("total key rate", "total_key_rate", True)]:
+                          ("avg rate bit/s", "avg_key_rate", True),
+                          ("total bit/s", "total_key_rate", True)]:
         dv = statsDV[key]*(100 if key == "success_rate" else 1)
         cv = statsCV[key]*(100 if key == "success_rate" else 1)
         fs = "{:>14.2e}" if e else "{:>13.0f}%"

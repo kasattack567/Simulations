@@ -7,6 +7,12 @@ Run all parameter-sensitivity scripts. By default saves PNGs into
     python run_all_sensitivity.py --show            # interactive
     python run_all_sensitivity.py --distance 20     # sweep at 20 km instead of 50
 
+Every figure is now a side-by-side pair in bit/s: panel (a) matched clock
+(DV 1 GHz, CV 1 GHz) isolates the protocol physics; panel (b) deployed clock
+(DV 1 GHz, CV 100 MHz) shows what the hardware actually delivers. The panels
+share a y-axis, so the decade of CV headroom loss in (b) is read straight off
+the figure. Clock rates live in sens_common.DV_CLOCK_HZ / CV_CLOCK_HZ.
+
 The default test distance (50 km) sits at the DV/CV crossover under the Wang
 Eq. 12 noise model. Re-run with --distance to check that conclusions are not an
 artefact of that choice; 20 km (CV-favourable) and 80 km (DV-favourable) are the

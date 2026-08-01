@@ -25,8 +25,19 @@ input-referred at 100 km, against ~0.098 SNU measured in Wang Table 2).
 CONSEQUENCE FOR THESE SWEEPS: eta and alpha now enter TWICE for CV — once through
 detection, once through xi_r. That coupling is physical and intended, but it means
 the CV curves in s1 and s3 are steeper than under the old constant-xi model.
+
+UNITS — bit/s, TWO PANELS PER FIGURE. The engines return bits per channel use;
+every figure now multiplies by a repetition rate and is plotted in bit/s as a
+side-by-side pair sharing one y-axis:
+    (a) matched clock   — DV 1 GHz, CV 1 GHz  (protocol physics, like-for-like)
+    (b) deployed clock  — DV 1 GHz, CV 100 MHz (what the hardware delivers)
+The DV curve is identical in both panels; CV drops by exactly one decade in (b).
+Only the plot helpers changed — cv_rate/dv_rate still return bits/channel use, so
+nothing downstream of them (crossover distances, network suite, cost model) is
+affected unless it calls these plotters. See CLOCK RATES below.
 """
 import os
+import textwrap
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import minimize_scalar
@@ -69,6 +80,53 @@ CV_XI_B   = 0.0005    # eps_b: Bob-side measurement noise (SNU)
 VA_LO, VA_HI = 1e-2, 10.0
 
 DARK_CPS_TO_PERGATE = 1e-9  # 100 cps @ 1 GHz, ~1 ns window -> 1e-7 per gate
+
+
+# ============================================================
+# CLOCK RATES — bits/channel-use -> bits/second
+# ============================================================
+# Both engines return an ASYMPTOTIC rate per channel use (DV: per pulse;
+# CV: per transmitted coherent state / symbol). Converting to bit/s requires a
+# repetition rate, and DV and CV do not run at the same one in deployed hardware:
+# modern SNSPD-based DV systems clock at ~1 GHz, while CV-QKD symbol rates are
+# ~100 MHz (limited by the DAC/ADC, the DSP chain and the shot-noise-limited
+# bandwidth of the balanced receiver, not by the protocol).
+#
+# Reporting only one of these is a choice with a thumb on the scale, so every
+# sensitivity figure is drawn as TWO PANELS:
+#   left  — matched clock (1 GHz both): isolates the PROTOCOL physics. Any
+#           DV/CV separation here is intrinsic to the protocols, not to the
+#           electronics, so this is the like-for-like comparison.
+#   right — deployed clock (DV 1 GHz, CV 100 MHz): what the two technologies
+#           actually deliver today. CV shifts down by exactly one decade; the DV
+#           curve is identical to the left panel by construction.
+#
+# The two panels SHARE a y-axis so the decade of separation is read directly off
+# the figure rather than hidden by independent autoscaling.
+DV_CLOCK_HZ  = 1e9    # SNSPD-based DV, ~1 GHz gating/free-running
+CV_CLOCK_HZ  = 1e8    # deployed CV symbol rate, ~100 MHz
+CV_CLOCK_MATCHED_HZ = DV_CLOCK_HZ   # hypothetical parity, left panel
+
+
+def _fmt_hz(f):
+    return f"{f/1e9:g} GHz" if f >= 1e9 else f"{f/1e6:g} MHz"
+
+
+# Panel order is left -> right. Each entry gives the (dv, cv) clock in Hz.
+PANELS = (
+    dict(key='matched',
+         dv=DV_CLOCK_HZ, cv=CV_CLOCK_MATCHED_HZ,
+         title=f"(a) Matched clock — DV {_fmt_hz(DV_CLOCK_HZ)}, "
+               f"CV {_fmt_hz(CV_CLOCK_MATCHED_HZ)}"),
+    dict(key='deployed',
+         dv=DV_CLOCK_HZ, cv=CV_CLOCK_HZ,
+         title=f"(b) Deployed clock — DV {_fmt_hz(DV_CLOCK_HZ)}, "
+               f"CV {_fmt_hz(CV_CLOCK_HZ)}"),
+)
+
+YLABEL = 'Secret key rate  (bit / s)'
+PANEL_FIGSIZE = (13.5, 5.8)
+Y_DECADES = 9          # clamp the log y-axis to this many decades below the peak
 
 
 # ============================================================
@@ -207,6 +265,78 @@ def _save_or_show(fig, output_dir, fname):
         plt.show()
 
 
+def _bps(y, clock_hz):
+    """bits/channel-use -> bit/s, with non-positive values masked.
+
+    Zeros are masked rather than plotted because a log axis silently drops them
+    and the line segment leading into a dropped point is misleading; NaN breaks
+    the line cleanly at the point where the rate goes to zero.
+    """
+    y = np.asarray(y, dtype=float) * float(clock_hz)
+    return np.where(y > 0, y, np.nan)
+
+
+def _autoscale_y(axes, series, decades=Y_DECADES):
+    """Clamp the shared log y-axis to `decades` below the global peak.
+
+    Without this a single curve diving toward zero stretches the axis over 20+
+    decades and flattens every other curve into a horizontal line.
+    """
+    vals = np.concatenate([np.asarray(s, dtype=float).ravel() for s in series])
+    vals = vals[np.isfinite(vals) & (vals > 0)]
+    if vals.size == 0:
+        return
+    top = 10 ** np.ceil(np.log10(vals.max()))
+    bot = max(vals.min(), top / 10 ** decades)
+    bot = 10 ** np.floor(np.log10(bot))
+    for ax in np.atleast_1d(axes).ravel():
+        ax.set_ylim(bot, top)
+
+
+def _panel_axes():
+    """Two side-by-side panels sharing a y-axis (matched clock | deployed clock)."""
+    return plt.subplots(1, 2, figsize=PANEL_FIGSIZE, sharey=True)
+
+
+NOTE_WRAP = 135        # caption characters per line before wrapping
+
+
+def _finish_panels(fig, axes, title, note=None, note_y=None):
+    """Label, title and lay out the two panels, then write the caption.
+
+    THE CAPTION MUST BE A FIGURE ARTIST, NOT AN AXES ARTIST. It was previously
+    drawn with axes[0].text(1.0, -0.16, ..., transform=axes[0].transAxes), which
+    makes a ~200-character string a CHILD of the left axes. tight_layout sizes
+    each axes to its tight bounding box INCLUDING its children, so the left axes
+    was shrunk until the overhanging caption fitted its half of the figure — the
+    panels collapsed to narrow strips with a large gap between them, and
+    savefig(bbox='tight') then grew the canvas to the caption's width (13.5 in
+    figure -> 14.6 in saved, 18.6 in for the twin-axis figures, whose caption is
+    half as long again). fig.text() is laid out after tight_layout has run and
+    cannot deform the axes, so the panels keep their allotted width.
+
+    `note_y` is accepted and ignored: the caption is now placed automatically
+    below the axes and vertical space is reserved for it in the layout rect.
+    """
+    axes[0].set_ylabel(YLABEL)
+    fig.suptitle(title, y=0.985, fontsize=13.5)
+    lines = textwrap.wrap(note, width=NOTE_WRAP) if note else []
+    # Reserve one caption line's worth of figure height, plus one per extra line.
+    bottom = 0.055 + 0.030 * max(len(lines) - 1, 0)
+    fig.tight_layout(rect=(0, bottom, 1, 0.95))
+    if lines:
+        fig.text(0.5, 0.012, "\n".join(lines), ha='center', va='bottom',
+                 fontsize=8.5, style='italic', color='0.35')
+
+
+CLOCK_NOTE = ("Both panels use the same simulated rates per channel use; only the "
+              "repetition rate differs, so the DV curve is identical in (a) and (b) "
+              "and CV is shifted down by one decade in (b).")
+
+TWIN_NOTE = ("Note: DV and CV use separate x-axes — curve crossings are not "
+             "physically meaningful.")
+
+
 # ============================================================
 # SHARED-AXIS PLOT (parameter identical for both protocols)
 # ============================================================
@@ -214,40 +344,53 @@ def shared_plot(x, dv, cv, xlabel, title, fname,
                 band=None, band_label=None, bands=None, logx=False, output_dir=None,
                 labels=('DV — decoy BB84', 'CV — GG02 heterodyne'),
                 colors=(DV_COLOR, CV_COLOR), markers=('-o', '-s'),
+                kinds=('dv', 'cv'),
                 legend_loc='best'):
-    """Shared x-axis (parameter identical for both protocols).
+    """Shared x-axis (parameter identical for both protocols), two clock panels.
     Pass a single band via (band, band_label), or multiple via
     bands=[((lo,hi), color, label), ...]. Crossings here ARE meaningful.
 
     labels/colors/markers are overridable so this helper can also plot two curves
     that are NOT one-DV-one-CV (e.g. CV heterodyne vs CV homodyne in s6). Leaving
     them at the defaults while passing non-DV data mislabels the figure.
+
+    `kinds` says which clock each curve is scaled by — ('dv','cv') by default.
+    Two CV curves must pass kinds=('cv','cv'), otherwise the first would be
+    scaled at the DV clock and the deployed panel would be wrong.
     """
-    fig, ax = plt.subplots(figsize=(8, 5.5))
-    handles = []
     band_list = []
     if bands is not None:
         band_list = bands
     elif band is not None:
         band_list = [(band, BAND_SH, band_label or "Deployed regime")]
-    for (lo, hi), color, label in band_list:
-        sp = ax.axvspan(lo, hi, alpha=0.16, color=color, zorder=0, label=label)
-        ax.axvline(lo, color=color, ls=':', lw=1.0, alpha=0.8, zorder=1)
-        ax.axvline(hi, color=color, ls=':', lw=1.0, alpha=0.8, zorder=1)
-        handles.append(sp)
-    h_dv, = ax.plot(x, dv, markers[0], color=colors[0], label=labels[0])
-    h_cv, = ax.plot(x, cv, markers[1], color=colors[1], label=labels[1])
-    handles += [h_dv, h_cv]
-    if logx:
-        ax.set_xscale('log')
-    ax.set_yscale('log')
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel('Secret key rate  (bits / channel use)')
-    ax.grid(True, which='both', alpha=0.25, linewidth=0.6)
-    ax.set_axisbelow(True)
-    ax.set_title(title, pad=10)
-    ax.legend(handles=handles, loc=legend_loc, framealpha=0.92, edgecolor='0.7')
-    fig.tight_layout()
+
+    fig, axes = _panel_axes()
+    all_series = []
+    for ax, panel in zip(axes, PANELS):
+        handles = []
+        for (lo, hi), color, label in band_list:
+            sp = ax.axvspan(lo, hi, alpha=0.16, color=color, zorder=0, label=label)
+            ax.axvline(lo, color=color, ls=':', lw=1.0, alpha=0.8, zorder=1)
+            ax.axvline(hi, color=color, ls=':', lw=1.0, alpha=0.8, zorder=1)
+            handles.append(sp)
+        y0 = _bps(dv, panel[kinds[0]])
+        y1 = _bps(cv, panel[kinds[1]])
+        all_series += [y0, y1]
+        h0, = ax.plot(x, y0, markers[0], color=colors[0], label=labels[0])
+        h1, = ax.plot(x, y1, markers[1], color=colors[1], label=labels[1])
+        handles += [h0, h1]
+        if logx:
+            ax.set_xscale('log')
+        ax.set_yscale('log')
+        ax.set_xlabel(xlabel)
+        ax.grid(True, which='both', alpha=0.25, linewidth=0.6)
+        ax.set_axisbelow(True)
+        ax.set_title(panel['title'], pad=8, fontsize=11.5)
+        if ax is axes[0]:
+            ax.legend(handles=handles, loc=legend_loc, framealpha=0.92,
+                      edgecolor='0.7')
+    _autoscale_y(axes, all_series)
+    _finish_panels(fig, axes, title, note=CLOCK_NOTE)
     _save_or_show(fig, output_dir, fname)
 
 
@@ -259,125 +402,148 @@ def shared_plot(x, dv, cv, xlabel, title, fname,
 def twin_plot(xdv, dv, xcv, cv, xl_dv, xl_cv, title, fname,
               band_dv=None, band_cv=None, band_dv_label=None, band_cv_label=None,
               logx_dv=False, logx_cv=False, output_dir=None):
-    fig, ax = plt.subplots(figsize=(8, 5.5))
-    axt = ax.twiny()
-    handles = []
+    fig, axes = _panel_axes()
+    all_series = []
+    for ax, panel in zip(axes, PANELS):
+        axt = ax.twiny()
+        handles = []
 
-    if band_dv is not None:
-        s1 = ax.axvspan(band_dv[0], band_dv[1], alpha=0.15, color=BAND_DV,
-                        zorder=0, label=band_dv_label or "DV deployed regime")
-        ax.axvline(band_dv[0], color=DV_COLOR, ls=':', lw=1.0, alpha=0.7, zorder=1)
-        ax.axvline(band_dv[1], color=DV_COLOR, ls=':', lw=1.0, alpha=0.7, zorder=1)
-        handles.append(s1)
-    if band_cv is not None:
-        s2 = axt.axvspan(band_cv[0], band_cv[1], alpha=0.15, color=BAND_CV,
-                         zorder=0, label=band_cv_label or "CV deployed regime")
-        axt.axvline(band_cv[0], color=CV_COLOR, ls=':', lw=1.0, alpha=0.7, zorder=1)
-        axt.axvline(band_cv[1], color=CV_COLOR, ls=':', lw=1.0, alpha=0.7, zorder=1)
-        handles.append(s2)
+        if band_dv is not None:
+            s1 = ax.axvspan(band_dv[0], band_dv[1], alpha=0.15, color=BAND_DV,
+                            zorder=0, label=band_dv_label or "DV deployed regime")
+            ax.axvline(band_dv[0], color=DV_COLOR, ls=':', lw=1.0, alpha=0.7, zorder=1)
+            ax.axvline(band_dv[1], color=DV_COLOR, ls=':', lw=1.0, alpha=0.7, zorder=1)
+            handles.append(s1)
+        if band_cv is not None:
+            s2 = axt.axvspan(band_cv[0], band_cv[1], alpha=0.15, color=BAND_CV,
+                             zorder=0, label=band_cv_label or "CV deployed regime")
+            axt.axvline(band_cv[0], color=CV_COLOR, ls=':', lw=1.0, alpha=0.7, zorder=1)
+            axt.axvline(band_cv[1], color=CV_COLOR, ls=':', lw=1.0, alpha=0.7, zorder=1)
+            handles.append(s2)
 
-    h_dv, = ax.plot(xdv, dv, '-o', color=DV_COLOR, label='DV — decoy BB84')
-    h_cv, = axt.plot(xcv, cv, '-s', color=CV_COLOR, label='CV — GG02 heterodyne')
-    handles += [h_dv, h_cv]
+        y_dv = _bps(dv, panel['dv'])
+        y_cv = _bps(cv, panel['cv'])
+        all_series += [y_dv, y_cv]
+        h_dv, = ax.plot(xdv, y_dv, '-o', color=DV_COLOR, label='DV — decoy BB84')
+        h_cv, = axt.plot(xcv, y_cv, '-s', color=CV_COLOR,
+                         label='CV — GG02 heterodyne')
+        handles += [h_dv, h_cv]
 
-    if logx_dv:
-        ax.set_xscale('log')
-    if logx_cv:
-        axt.set_xscale('log')
-    ax.set_yscale('log')
+        if logx_dv:
+            ax.set_xscale('log')
+        if logx_cv:
+            axt.set_xscale('log')
+        ax.set_yscale('log')
+        axt.set_yscale('log')
 
-    ax.set_xlabel(xl_dv, color=DV_COLOR)
-    axt.set_xlabel(xl_cv, color=CV_COLOR)
-    ax.tick_params(axis='x', colors=DV_COLOR)
-    axt.tick_params(axis='x', colors=CV_COLOR)
-    ax.spines['bottom'].set_color(DV_COLOR)
-    axt.spines['top'].set_color(CV_COLOR)
+        ax.set_xlabel(xl_dv, color=DV_COLOR)
+        axt.set_xlabel(xl_cv, color=CV_COLOR)
+        ax.tick_params(axis='x', colors=DV_COLOR)
+        axt.tick_params(axis='x', colors=CV_COLOR)
+        ax.spines['bottom'].set_color(DV_COLOR)
+        axt.spines['top'].set_color(CV_COLOR)
 
-    ax.set_ylabel('Secret key rate  (bits / channel use)')
-    ax.grid(True, which='both', alpha=0.25, linewidth=0.6)
-    ax.set_axisbelow(True)
-    ax.set_title(title, pad=22)   # extra pad: top axis labels sit above
-    ax.legend(handles=handles, loc='best', framealpha=0.92, edgecolor='0.7')
+        ax.grid(True, which='both', alpha=0.25, linewidth=0.6)
+        ax.set_axisbelow(True)
+        ax.set_title(panel['title'], pad=32, fontsize=11.5)  # pad: top axis label
+        if ax is axes[0]:
+            ax.legend(handles=handles, loc='best', framealpha=0.92, edgecolor='0.7')
     # Caveat: the two curves use DIFFERENT x-axes (DV bottom, CV top), so any
     # apparent intersection is an artefact of axis alignment, not a physical
     # equivalence. State this on the figure so it cannot be misread.
-    ax.text(0.5, -0.18,
-            "Note: DV and CV use separate x-axes — curve crossings are not physically meaningful.",
-            transform=ax.transAxes, ha='center', va='top',
-            fontsize=8.5, style='italic', color='0.35')
-    fig.tight_layout()
+    # (twiny() shares the parent's y-axis, so clamping `axes` covers the twins.)
+    _autoscale_y(axes, all_series)
+    _finish_panels(fig, axes, title, note=TWIN_NOTE + " " + CLOCK_NOTE,
+                   note_y=-0.155)
     _save_or_show(fig, output_dir, fname)
 
 
 def shared_plot3(x, dv, cv_het, cv_hom, xlabel, title, fname,
                  bands=None, logx=False, output_dir=None, legend_loc='best'):
-    """Shared x-axis with three curves: DV, CV heterodyne, CV homodyne.
+    """Shared x-axis with three curves: DV, CV heterodyne, CV homodyne, drawn as
+    two clock panels (matched 1 GHz | deployed DV 1 GHz vs CV 100 MHz).
     Used where the parameter is identical for all (beta, alpha, detector eff)."""
-    fig, ax = plt.subplots(figsize=(8, 5.5))
-    handles = []
-    for (lo, hi), color, label in (bands or []):
-        sp = ax.axvspan(lo, hi, alpha=0.16, color=color, zorder=0, label=label)
-        ax.axvline(lo, color=color, ls=':', lw=1.0, alpha=0.8, zorder=1)
-        ax.axvline(hi, color=color, ls=':', lw=1.0, alpha=0.8, zorder=1)
-        handles.append(sp)
-    h_dv,  = ax.plot(x, dv,     '-o', color=DV_COLOR, label='DV — decoy BB84')
-    h_het, = ax.plot(x, cv_het, '-s', color=CV_COLOR, label='CV — GG02 heterodyne')
-    h_hom, = ax.plot(x, cv_hom, '--D', color='#7d2d8c', ms=3.5,
-                     label='CV — GG02 homodyne')
-    handles += [h_dv, h_het, h_hom]
-    if logx:
-        ax.set_xscale('log')
-    ax.set_yscale('log')
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel('Secret key rate  (bits / channel use)')
-    ax.grid(True, which='both', alpha=0.25, linewidth=0.6)
-    ax.set_axisbelow(True)
-    ax.set_title(title, pad=10)
-    ax.legend(handles=handles, loc=legend_loc, framealpha=0.92, edgecolor='0.7')
-    fig.tight_layout()
+    fig, axes = _panel_axes()
+    all_series = []
+    for ax, panel in zip(axes, PANELS):
+        handles = []
+        for (lo, hi), color, label in (bands or []):
+            sp = ax.axvspan(lo, hi, alpha=0.16, color=color, zorder=0, label=label)
+            ax.axvline(lo, color=color, ls=':', lw=1.0, alpha=0.8, zorder=1)
+            ax.axvline(hi, color=color, ls=':', lw=1.0, alpha=0.8, zorder=1)
+            handles.append(sp)
+        y_dv  = _bps(dv,     panel['dv'])
+        y_het = _bps(cv_het, panel['cv'])
+        y_hom = _bps(cv_hom, panel['cv'])
+        all_series += [y_dv, y_het, y_hom]
+        h_dv,  = ax.plot(x, y_dv,  '-o', color=DV_COLOR, label='DV — decoy BB84')
+        h_het, = ax.plot(x, y_het, '-s', color=CV_COLOR,
+                         label='CV — GG02 heterodyne')
+        h_hom, = ax.plot(x, y_hom, '--D', color='#7d2d8c', ms=3.5,
+                         label='CV — GG02 homodyne')
+        handles += [h_dv, h_het, h_hom]
+        if logx:
+            ax.set_xscale('log')
+        ax.set_yscale('log')
+        ax.set_xlabel(xlabel)
+        ax.grid(True, which='both', alpha=0.25, linewidth=0.6)
+        ax.set_axisbelow(True)
+        ax.set_title(panel['title'], pad=8, fontsize=11.5)
+        if ax is axes[0]:
+            ax.legend(handles=handles, loc=legend_loc, framealpha=0.92,
+                      edgecolor='0.7')
+    _autoscale_y(axes, all_series)
+    _finish_panels(fig, axes, title, note=CLOCK_NOTE)
     _save_or_show(fig, output_dir, fname)
 
 
 def twin_plot3(xdv, dv, xcv, cv_het, cv_hom, xl_dv, xl_cv, title, fname,
                band_dv=None, band_cv=None, band_dv_label=None, band_cv_label=None,
                logx_dv=False, output_dir=None, legend_loc='best'):
-    """Twin x-axes: DV (bottom) vs CV het+hom (top). Crossings not meaningful."""
-    fig, ax = plt.subplots(figsize=(8, 5.5))
-    axt = ax.twiny()
-    handles = []
-    if band_dv is not None:
-        s1 = ax.axvspan(band_dv[0], band_dv[1], alpha=0.15, color=BAND_DV,
-                        zorder=0, label=band_dv_label or "DV deployed regime")
-        ax.axvline(band_dv[0], color=DV_COLOR, ls=':', lw=1.0, alpha=0.7, zorder=1)
-        ax.axvline(band_dv[1], color=DV_COLOR, ls=':', lw=1.0, alpha=0.7, zorder=1)
-        handles.append(s1)
-    if band_cv is not None:
-        s2 = axt.axvspan(band_cv[0], band_cv[1], alpha=0.15, color=BAND_CV,
-                         zorder=0, label=band_cv_label or "CV deployed regime")
-        axt.axvline(band_cv[0], color=CV_COLOR, ls=':', lw=1.0, alpha=0.7, zorder=1)
-        axt.axvline(band_cv[1], color=CV_COLOR, ls=':', lw=1.0, alpha=0.7, zorder=1)
-        handles.append(s2)
-    h_dv,  = ax.plot(xdv, dv, '-o', color=DV_COLOR, label='DV — decoy BB84')
-    h_het, = axt.plot(xcv, cv_het, '-s', color=CV_COLOR, label='CV — heterodyne')
-    h_hom, = axt.plot(xcv, cv_hom, '--D', color='#7d2d8c', ms=3.5,
-                      label='CV — homodyne')
-    handles += [h_dv, h_het, h_hom]
-    if logx_dv:
-        ax.set_xscale('log')
-    ax.set_yscale('log')
-    ax.set_xlabel(xl_dv, color=DV_COLOR); axt.set_xlabel(xl_cv, color=CV_COLOR)
-    ax.tick_params(axis='x', colors=DV_COLOR); axt.tick_params(axis='x', colors=CV_COLOR)
-    ax.spines['bottom'].set_color(DV_COLOR); axt.spines['top'].set_color(CV_COLOR)
-    ax.set_ylabel('Secret key rate  (bits / channel use)')
-    ax.grid(True, which='both', alpha=0.25, linewidth=0.6)
-    ax.set_axisbelow(True)
-    ax.set_title(title, pad=22)
-    ax.legend(handles=handles, loc=legend_loc, framealpha=0.92, edgecolor='0.7')
-    ax.text(0.5, -0.18,
-            "Note: DV and CV use separate x-axes — curve crossings are not physically meaningful.",
-            transform=ax.transAxes, ha='center', va='top',
-            fontsize=8.5, style='italic', color='0.35')
-    fig.tight_layout()
+    """Twin x-axes: DV (bottom) vs CV het+hom (top), drawn as two clock panels
+    (matched 1 GHz | deployed DV 1 GHz vs CV 100 MHz). Crossings not meaningful."""
+    fig, axes = _panel_axes()
+    all_series = []
+    for ax, panel in zip(axes, PANELS):
+        axt = ax.twiny()
+        handles = []
+        if band_dv is not None:
+            s1 = ax.axvspan(band_dv[0], band_dv[1], alpha=0.15, color=BAND_DV,
+                            zorder=0, label=band_dv_label or "DV deployed regime")
+            ax.axvline(band_dv[0], color=DV_COLOR, ls=':', lw=1.0, alpha=0.7, zorder=1)
+            ax.axvline(band_dv[1], color=DV_COLOR, ls=':', lw=1.0, alpha=0.7, zorder=1)
+            handles.append(s1)
+        if band_cv is not None:
+            s2 = axt.axvspan(band_cv[0], band_cv[1], alpha=0.15, color=BAND_CV,
+                             zorder=0, label=band_cv_label or "CV deployed regime")
+            axt.axvline(band_cv[0], color=CV_COLOR, ls=':', lw=1.0, alpha=0.7, zorder=1)
+            axt.axvline(band_cv[1], color=CV_COLOR, ls=':', lw=1.0, alpha=0.7, zorder=1)
+            handles.append(s2)
+        y_dv  = _bps(dv,     panel['dv'])
+        y_het = _bps(cv_het, panel['cv'])
+        y_hom = _bps(cv_hom, panel['cv'])
+        all_series += [y_dv, y_het, y_hom]
+        h_dv,  = ax.plot(xdv, y_dv, '-o', color=DV_COLOR, label='DV — decoy BB84')
+        h_het, = axt.plot(xcv, y_het, '-s', color=CV_COLOR, label='CV — heterodyne')
+        h_hom, = axt.plot(xcv, y_hom, '--D', color='#7d2d8c', ms=3.5,
+                          label='CV — homodyne')
+        handles += [h_dv, h_het, h_hom]
+        if logx_dv:
+            ax.set_xscale('log')
+        ax.set_yscale('log')
+        ax.set_xlabel(xl_dv, color=DV_COLOR); axt.set_xlabel(xl_cv, color=CV_COLOR)
+        ax.tick_params(axis='x', colors=DV_COLOR)
+        axt.tick_params(axis='x', colors=CV_COLOR)
+        ax.spines['bottom'].set_color(DV_COLOR); axt.spines['top'].set_color(CV_COLOR)
+        ax.grid(True, which='both', alpha=0.25, linewidth=0.6)
+        ax.set_axisbelow(True)
+        ax.set_title(panel['title'], pad=32, fontsize=11.5)
+        if ax is axes[0]:
+            ax.legend(handles=handles, loc=legend_loc, framealpha=0.92,
+                      edgecolor='0.7')
+    _autoscale_y(axes, all_series)
+    _finish_panels(fig, axes, title, note=TWIN_NOTE + " " + CLOCK_NOTE,
+                   note_y=-0.155)
     _save_or_show(fig, output_dir, fname)
 
 

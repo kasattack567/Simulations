@@ -9,41 +9,57 @@ For each of the six selected topologies at REAL scale, compute per-protocol:
                     unreachable pairs counted as zero (do NOT average only
                     over connected pairs).
 
-Two unit views produced from the same underlying rates:
-  - bits per channel use  (protocol physics)
-  - bits per second       (deployment view, DV*1GHz vs CV*100MHz)
+Rates are reported in BITS/S at a MATCHED 1 GHz clock for both DV and CV. This
+figure pins that clock locally (see CLOCK_HZ below) rather than reading
+net_common's configurable value, because a matched-clock comparison is what this
+figure is for: it isolates the protocol physics, so any DV/CV separation here is
+intrinsic to the protocols and not to the electronics. It is NOT the deployed
+view — fielded CV symbol rates are ~100 MHz. The CSV retains the raw
+bits/channel-use column alongside the bits/s one for traceability.
+
+ONE FIGURE, TWO PANELS SIDE BY SIDE:
+  (left)  coverage — link coverage (solid bars) and pair coverage (hatched),
+          for both protocols. Link coverage is per-edge; pair coverage is
+          per node pair after widest-path routing, so a single dead edge that
+          severs the graph drops it far faster than it drops link coverage.
+  (right) avg pair rate in bits/s, survivorship corrected.
 
 USAGE:
     python Networks/topo_direct.py
 
 Outputs:
-    topo_direct_summary.csv      -- one row per (topology, protocol)
-    topo_direct_coverage.png     -- link + pair coverage bar chart
-    topo_direct_rate.png         -- avg pair rate (both unit views)
+    topo_direct_summary.csv         -- one row per (topology, protocol)
+    topo_direct_coverage_rate.png   -- the two-panel figure
 """
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 import heapq
 
 from topo_loader import TOPOLOGY_FILES, load_topology, edge_lengths
-from net_common import link_rate
+from net_common import (link_rate, is_reachable, reachable_threshold,
+                        REACHABLE_BPS)
 
-DV_CLOCK_HZ = 1e9      # commercial-grade DV (Clavis XGR class)
-CV_CLOCK_HZ = 100e6    # QOSST-class high-rate CV
-CLOCK = {"dv": DV_CLOCK_HZ, "cv_het": CV_CLOCK_HZ}
+# MATCHED CLOCK, PINNED. Both protocols are clocked at 1 GHz for this figure and
+# this value is deliberately NOT taken from net_common.clock_hz: net_common's
+# clocks are configurable (QKD_CV_CLOCK_HZ) so that other scripts can be switched
+# to the deployed view, whereas this figure is defined as the matched-clock
+# comparison and must not silently change when that env var is set.
+CLOCK_HZ = 1e9
 
 PROTOS = ("dv", "cv_het")
 PROTO_LABEL = {"dv": "DV (decoy BB84)", "cv_het": "CV (GG02 het.)"}
 PROTO_COLOR = {"dv": "tab:blue", "cv_het": "tab:red"}
 
 
-def widest_path_rates(n_nodes, edges, erates):
+def widest_path_rates(n_nodes, edges, erates, floor=0.0):
     """All-pairs bottleneck rates via modified Dijkstra (max-min).
-    Returns an (n,n) matrix; 0.0 where no positive-rate path exists."""
+    Edges below `floor` (bits/channel use) are not traversable.
+    Returns an (n,n) matrix; 0.0 where no reachable path exists."""
     adj = [[] for _ in range(n_nodes)]
     for (u, v), r in zip(edges, erates):
-        if r > 0.0:
+        if r >= floor:
             adj[u].append((v, r))
             adj[v].append((u, r))
     pair = np.zeros((n_nodes, n_nodes))
@@ -73,17 +89,20 @@ def analyse(name, topo, proto):
     n = len(topo["node_ids"])
     edges = topo["edges"]
 
-    link_alive = np.count_nonzero(erates > 0.0)
+    link_alive = int(np.count_nonzero(is_reachable(erates, proto)))
     link_cov = link_alive / len(edges) if edges else 0.0
 
-    pair = widest_path_rates(n, edges, erates)
+    pair = widest_path_rates(n, edges, erates,
+                             floor=reachable_threshold(proto))
     iu = np.triu_indices(n, k=1)
     w = pair[iu]
     n_pairs = len(w)
     pair_cov = float(np.count_nonzero(w > 0.0)) / n_pairs if n_pairs else 0.0
+    # w is already floored: widest_path_rates dropped sub-floor edges, and a
+    # bottleneck is a min over surviving edges, so any positive w clears it.
     # SURVIVORSHIP-CORRECTED: mean over ALL pairs, failed pairs count as zero
     avg_rate_channel = float(w.sum()) / n_pairs if n_pairs else 0.0
-    avg_rate_bps = avg_rate_channel * CLOCK[proto]
+    avg_rate_bps = avg_rate_channel * CLOCK_HZ   # same clock for both protocols
 
     return dict(
         topology=name, protocol=proto, nodes=n, edges=len(edges),
@@ -114,63 +133,71 @@ def main():
     df.to_csv("topo_direct_summary.csv", index=False)
     print(f"\nSaved: topo_direct_summary.csv")
 
-    # coverage figure
+    # ============================================================
+    # ONE FIGURE, TWO PANELS: coverage (left) | key rate (right)
+    # No sharey — the panels carry different quantities and different scales
+    # (percent on a linear axis vs bits/s on a log axis).
+    # ============================================================
     names = list(TOPOLOGY_FILES.keys())
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4.5), sharey=True)
+    fig, (axC, axR) = plt.subplots(1, 2, figsize=(14, 5.2))
     x = np.arange(len(names))
-    w = 0.35
-    for i, proto in enumerate(PROTOS):
-        cov_link = [df[(df.topology == n) & (df.protocol == proto)]
-                    ["link_coverage"].iloc[0] * 100 for n in names]
-        cov_pair = [df[(df.topology == n) & (df.protocol == proto)]
-                    ["pair_coverage"].iloc[0] * 100 for n in names]
-        ax1.bar(x + (i - 0.5) * w, cov_link, w,
-                color=PROTO_COLOR[proto], label=PROTO_LABEL[proto], alpha=0.85)
-        ax2.bar(x + (i - 0.5) * w, cov_pair, w,
-                color=PROTO_COLOR[proto], label=PROTO_LABEL[proto], alpha=0.85)
-    for ax, ttl in [(ax1, "Direct link coverage"),
-                    (ax2, "Pair coverage (widest-path)")]:
-        ax.set_xticks(x)
-        ax.set_xticklabels(names, rotation=25, ha="right", fontsize=9)
-        ax.set_ylabel("Coverage (%)")
-        ax.set_ylim(0, 105)
-        ax.set_title(ttl)
-        ax.legend(fontsize=9)
-        ax.grid(True, alpha=0.3, axis="y")
-    fig.suptitle("Direct-link (no-relay) coverage across six topologies "
-                 "(real scale)", fontsize=12)
-    plt.tight_layout()
-    plt.savefig("topo_direct_coverage.png", dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print("Saved: topo_direct_coverage.png")
 
-    # rate figure (two unit views)
-    fig, (axc, axs) = plt.subplots(1, 2, figsize=(12, 4.5))
+    def _col(proto, field):
+        return [df[(df.topology == n) & (df.protocol == proto)][field].iloc[0]
+                for n in names]
+
+    # ---- left: coverage. Four bars per topology: {DV, CV} x {link, pair}.
+    # Link vs pair is encoded by hatching rather than by colour, so protocol
+    # stays readable as colour throughout the figure.
+    wc = 0.2
+    offsets = {("dv", "link"): -1.5, ("dv", "pair"): -0.5,
+               ("cv_het", "link"): 0.5, ("cv_het", "pair"): 1.5}
+    for proto in PROTOS:
+        for kind, field in (("link", "link_coverage"), ("pair", "pair_coverage")):
+            axC.bar(x + offsets[(proto, kind)] * wc,
+                    np.array(_col(proto, field)) * 100, wc,
+                    color=PROTO_COLOR[proto], alpha=0.85,
+                    hatch="" if kind == "link" else "///",
+                    edgecolor="white", linewidth=0.4)
+    axC.set_ylabel("Coverage (%)")
+    # Headroom above 100% so the legend sits clear of the bars rather than on
+    # top of them; ticks stop at 100 so the axis still reads as a percentage.
+    axC.set_ylim(0, 138)
+    axC.set_yticks(range(0, 101, 20))
+    axC.set_title("Coverage: direct links and routed pairs")
+    axC.grid(True, alpha=0.3, axis="y")
+    cov_handles = (
+        [Patch(facecolor=PROTO_COLOR[p], alpha=0.85, label=PROTO_LABEL[p])
+         for p in PROTOS]
+        + [Patch(facecolor="0.75", edgecolor="white", label="Link coverage"),
+           Patch(facecolor="0.75", edgecolor="white", hatch="///",
+                 label="Pair coverage (widest-path)")])
+    axC.legend(handles=cov_handles, fontsize=8, ncol=2, loc="upper center",
+               framealpha=0.9, borderaxespad=0.4)
+
+    # ---- right: average pair rate, bits/s at the matched 1 GHz clock.
+    # Log axis: a zero average cannot be drawn, so it is clamped to the floor
+    # below and shows as an absent bar. Absent = zero, not missing data.
+    wr = 0.35
     for i, proto in enumerate(PROTOS):
-        r_ch = [df[(df.topology == n) & (df.protocol == proto)]
-                ["avg_pair_rate_channel"].iloc[0] for n in names]
-        r_bs = [df[(df.topology == n) & (df.protocol == proto)]
-                ["avg_pair_rate_bps"].iloc[0] for n in names]
-        axc.bar(x + (i - 0.5) * w, np.maximum(r_ch, 1e-20), w,
-                color=PROTO_COLOR[proto], label=PROTO_LABEL[proto], alpha=0.85)
-        axs.bar(x + (i - 0.5) * w, np.maximum(r_bs, 1e-20), w,
-                color=PROTO_COLOR[proto], label=PROTO_LABEL[proto], alpha=0.85)
-    for ax, ylabel, ttl in [
-        (axc, "Avg pair rate (bits/channel use)", "Protocol physics view"),
-        (axs, "Avg pair rate (bits/s)", "Deployment view (with clocks)")]:
-        ax.set_yscale("log")
+        axR.bar(x + (i - 0.5) * wr, np.maximum(_col(proto, "avg_pair_rate_bps"), 1e-20),
+                wr, color=PROTO_COLOR[proto], label=PROTO_LABEL[proto], alpha=0.85)
+    axR.set_yscale("log")
+    axR.set_ylabel("Average key rate per pair (bits / s)")
+    axR.set_title("Key rate: average over all pairs")
+    axR.grid(True, alpha=0.3, axis="y", which="both")
+    axR.legend(fontsize=9)
+
+    for ax in (axC, axR):
         ax.set_xticks(x)
         ax.set_xticklabels(names, rotation=25, ha="right", fontsize=9)
-        ax.set_ylabel(ylabel)
-        ax.set_title(ttl)
-        ax.legend(fontsize=9)
-        ax.grid(True, alpha=0.3, axis="y", which="both")
-    fig.suptitle("Direct-link (no-relay) average pair rate — survivorship "
-                 "corrected", fontsize=12)
-    plt.tight_layout()
-    plt.savefig("topo_direct_rate.png", dpi=150, bbox_inches="tight")
+
+    fig.suptitle("Direct-link (no-relay) comparison across six real topologies "
+                 "(real scale) — rate is survivorship corrected", fontsize=12)
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    plt.savefig("topo_direct_coverage_rate.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print("Saved: topo_direct_rate.png")
+    print("Saved: topo_direct_coverage_rate.png")
 
 
 if __name__ == "__main__":
