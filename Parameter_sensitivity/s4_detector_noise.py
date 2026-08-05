@@ -31,5 +31,5 @@ twin_plot3(RANGES['dv_dark'], dv, RANGES['cv_vel'], cv_het, cv_hom,
            's4_detector_noise.png',
            band_dv=BAND['dv_dark'], band_cv=BAND['cv_vel'],
            band_dv_label='DV deployed (1–1000 cps)',
-           band_cv_label='CV deployed (0.05–0.11 SNU)',
+           band_cv_label='CV deployed (0.015–0.11 SNU)',
            logx_dv=True, legend_loc='lower left', output_dir=args.output_dir)

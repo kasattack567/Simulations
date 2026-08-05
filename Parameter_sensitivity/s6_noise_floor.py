@@ -36,7 +36,7 @@ shared_plot(xa, cv_het, cv_hom,
             f'CV key rate vs excess-noise floor   ($L = {L:.0f}$ km, '
             f'$\\epsilon_b = {CV_XI_B:.0e}$ SNU)',
             's6_noise_floor.png',
-            band=BAND['cv_xi_al'], band_label='Deployed floor (0.003–0.008 SNU)',
+            band=BAND['cv_xi_al'], band_label='Sweep range (0.003–0.008 SNU)',
             labels=('CV — GG02 heterodyne', 'CV — GG02 homodyne'),
             colors=(CV_COLOR, '#7d2d8c'), markers=('-s', '--D'),
             kinds=('cv', 'cv'),   # BOTH curves are CV -> both scale at the CV clock

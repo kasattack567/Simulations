@@ -55,10 +55,12 @@ from tno.quantum.communication.qkd_key_rate.quantum.bb84 import (
 # LOCKED BASELINE (must match cv_hetro.py / param.md section 0)
 # ============================================================
 # Sensitivity test distance. Chosen to sit near the DV/CV crossover so that both
-# protocols are competitive and the sweeps are informative. The crossover moved
-# from ~23 km to 50.6 km when the CV noise model changed to Wang Eq. 12, so this
-# moved with it. Override per-run with --distance.
-L_KM = 50.0
+# protocols are competitive and the sweeps are informative. Set to the exact
+# DV/CV crossover at the baseline beta = 0.95, located by bisection (49.891 km).
+# NB the crossover is beta-dependent: 27.2 km at beta = 0.90, 56.8 km at 0.96,
+# so this is the crossover at baseline, not a universal one. The report rounds
+# it to 50 km. Override per-run with --distance.
+L_KM = 49.891
 ALPHA_DB_KM = 0.20
 
 DV_EFFICIENCY = 0.65
@@ -587,7 +589,7 @@ def arg_output_dir():
 #                      hi: deployed field fibre 0.19-0.21 (Tang 2016 et al.)
 #  DV dark  1-1000 cps lo: Swedish 303km field SNSPD <=1 cps (arXiv:2606.06107)
 #                      hi: Boston metro WSi/NbN ~1000 cps (arXiv:1708.00434)
-#  CV v_el  0.05-0.11  lo: best balanced homodyne ~0.05 (arXiv:1006.4216)
+#  CV v_el  0.015-0.11 lo: Jouguet 2013 deployed 80 km system, v_el=0.015
 #                      hi: deployed field BPD 0.11 SNU (npj QI 2025, s41534-025-01060-7)
 #  CV eps_b 5e-4-2e-3 lo: Wang 2019 prototype calibration; also reproduces the
 #                          LuxQuanta NOVA LQ Gen-2 spec (100 km / 20 dB)
@@ -619,7 +621,7 @@ RANGES = dict(
 )
 BAND = dict(
     dv_eta=(0.65, 0.93), cv_eta=(0.60, 0.72), beta=(0.90, 0.96),
-    alpha=(0.091, 0.20), dv_dark=(1, 1000), cv_vel=(0.05, 0.11),
+    alpha=(0.091, 0.20), dv_dark=(1, 1000), cv_vel=(0.015, 0.11),
     dv_qber=(0.005, 0.021),
     # eps_b lo: Wang 2019 calibration to their prototype (5e-4), which also
     # reproduces the 100 km / 20 dB reach of the LuxQuanta NOVA LQ Gen-2

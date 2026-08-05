@@ -11,8 +11,8 @@ field, and CV with the homodyne receivers that real CV deployments use. Neither
 protocol is handicapped with cheaper hardware than the other.
 
 The same locked baseline is used throughout the project: in the point-to-point
-comparison (simulated over 0-50 km, the range in which both protocols produce
-key — CV's reach at this baseline is ~34 km) and in the network-topology study,
+comparison (simulated over 0-100 km, the range in which both protocols produce
+key — CV's reach at this baseline is 94 km) and in the network-topology study,
 where it is applied to real optical network topologies at their native link
 lengths. Parameter values are properties of the hardware tier, not of any one
 deployment distance, so a single baseline serves both studies.
@@ -33,6 +33,18 @@ figures are the appropriate choice.
 > (Tang 2016), not a selection criterion, and has been removed so the baseline
 > honestly covers the network study's full range of link lengths. No simulation
 > results are affected by this reframing.
+
+> **Model note (audit trail, supersedes earlier CV numbers).** The CV excess
+> noise was originally a single Bob-referred constant (xi_bob = 0.015 SNU,
+> converted to the channel input as xi_bob/(T*eta)). That form has been replaced
+> by the two-parameter decomposition of Wang et al., Opt. Express 27, 13372
+> (2019), Eq. 12 — see section 3. The constant-xi form had no channel floor and
+> an implied Bob-side term roughly 30x too large: it predicted ~2.5 SNU
+> input-referred at 100 km against ~0.098 SNU measured in Wang's Table 2. Every
+> CV figure produced under the constant-xi model is superseded. The headline
+> consequence is large and must not be quoted from old drafts: **CV reach moved
+> from ~34 km to 94 km and the DV/CV crossover from ~18 km to ~50 km.** DV
+> parameters and DV results are unaffected.
 
 ---
 
@@ -62,9 +74,23 @@ commercial-grade), per the fairness argument in methodology.md.
 |---|---|---|---|
 | Detector efficiency | eta | 0.60 | Lodewyck et al. 2007, PRA 76 042305 (0.606); corroborated Zhang 2020 (0.613) |
 | Electronic noise | v_el | 0.10 | Zhang et al. 2020, PRL 125 010502 (deployment-grade homodyne ~0.1 SNU); corroborated arXiv:2305.03419 (0.1) |
-| Excess noise | xi_ch (channel) | 0.01 | Channel-only excess noise (detector noise carried separately via Vel in the trusted-detector model). "Typical" channel value 0.01 SNU (Lin/Lütkenhaus dimension-reduction, arXiv:2101.05799; Ghorai et al., arXiv:0807.3751). Deployed field range: 5G fronthaul trusted xi_T = 0.0009–0.0094 (arXiv:2104.04360); Zhang 2020 channel-input 0.0015–0.008 (arXiv:2001.02555) |
+| Excess noise, Alice + fibre floor | eps_a + eps_l | 0.005 SNU | Wang et al., Opt. Express 27, 13372 (2019), Eq. 12 / Table 2 — calibrated against their measured prototype. Constant, does not scale with distance |
+| Excess noise, Bob-side | eps_b | 0.0005 SNU | Wang et al. 2019 prototype calibration. Arises AFTER the channel, so referred to the channel input it is amplified by 1/(eta*T) and grows with distance |
 | Reconciliation | beta | 0.95 | Deployed CV LDPC standard 0.95 (Shen 2020, Chin. Phys. B 29 040301, 95.42%); 0.98 optimistic ceiling |
 | Modulation variance | Va | optimised (cap 10 SNU) | Operating-point dial; deployed Va~3-6 (Jouguet; arXiv:2305.03419 Va=5.8). Numerically optimised per distance |
+
+NB on CV excess noise: the two rows above are NOT a total. The channel-input
+referred excess noise that qosst-skr's `xi` argument expects is assembled at
+each distance as
+
+    xi_r(T) = (eps_a + eps_l) + eps_b / (eta * T)
+
+so "total excess noise" is an OUTPUT of the model, not an input, and it is
+distance-dependent: 0.005 SNU at 0 km, 0.0133 SNU at 50 km, ~0.098 SNU at
+100 km (matching Wang Table 2). Total excess-noise figures quoted in the
+literature must never be fed into `xi` directly, and detector electronic noise
+must not be folded in either — v_el is a separate argument in the
+trusted-detector model, so including it in xi double-counts it.
 
 NB on DV reconciliation: TNO's BB84FullyAsymptoticKeyRateEstimate hardcodes the
 error-correction term at the Shannon limit (beta_DV = 1, ideal); it exposes no
@@ -168,21 +194,59 @@ homodyne receiver and reflects what deployed QKD networks actually field.
 - Best lab balanced homodyne (Chi 2010): ~0.05 SNU (13 dB below shot).
 - **0.10 = deployed baseline; sensitivity band 0.05-0.11 (lo: best balanced homodyne ~0.05; hi: deployed field BPD 0.11 SNU, npj QI 2025).**
 
-### CV excess noise xi = 0.015 SNU (Bob-referred)
+### CV excess noise — Wang Eq. 12: eps_a + eps_l = 0.005, eps_b = 0.0005 SNU
 
-- Huang 2016 (100 km, controlled excess noise): 0.015 SNU.
-- Zhang 2020: 0.0015 (short) to 0.008 (200 km), channel-input referred.
-- Commercial-fibre field tests (Zhang 2017): ~0.01-0.03 SNU.
-- **0.015 SNU = deployed baseline; sensitivity band 0.01-0.03 (lo: 5G fronthaul field 0.0146, arXiv:2104.04360; hi: commercial-fibre field ~0.03).**
-- **NB code conversion (CORRECTED):** the qosst-skr `xi` argument is the
-  CHANNEL-INPUT-referred excess noise; the Bob-referred value is converted as
-  `xi_input = xi_bob / (T * eta)`. This matches QOSST's own documentation example
-  (`GaussianChannel(T, xi_bob / (T * eta))`) and was calibrated against QOSST's
-  own asymptotic calculator (qosst-sim) to <15% (residual = ideal-Gaussian vs
-  discrete-QAM modulation, expected). An earlier version used
-  `2 * xi_bob / (T * eta)` — the extra factor of 2 is NOT in the QOSST reference,
-  made the excess noise 2x too high, and collapsed the CV range to ~23 km. With
-  the factor of 2 removed, CV reaches ~34 km at baseline (see caveat 7).
+**The model.** Excess noise is not one number. Wang et al., Opt. Express 27,
+13372 (2019), Sec. 5, Eq. 12 decomposes it by where it originates:
+
+    xi_r(T) = (eps_a + eps_l) + eps_b / (eta * T)      [channel-input referred]
+
+- `eps_a + eps_l` — Alice-side modulation/RIN noise plus fibre-channel noise.
+  Both arise BEFORE or WITHIN the channel, so referred to the channel input they
+  are a constant floor. **0.005 SNU.**
+- `eps_b` — Bob-side measurement noise (phase-reference recovery, imperfect
+  interference, residual DSP error). Arises AFTER the channel, so it does not
+  attenuate; referred to the input it is amplified by 1/(eta*T) and therefore
+  **grows with distance**. **0.0005 SNU.**
+
+**Why this matters.** The 1/(eta*T) amplification is precisely what gives CV a
+hard distance ceiling. A constant xi does not reproduce that ceiling at all —
+it makes CV degrade gracefully forever, which is not what CV hardware does.
+This is the single most consequential modelling choice on the CV side.
+
+**Sourcing and corroboration.**
+- Both values are Wang's own calibration against their measured prototype
+  (Table 2 / Fig. 8). Agreement is approximate, matching Wang's own wording:
+  the assembled xi_r matches the measured values at 0/50/100 km within ~15%
+  (0.0058/0.0133/0.0883 vs 0.0052/0.0158/0.0979) but is conservative by roughly
+  a factor of two at the intermediate points (20 km: 0.0071 vs 0.0134; 80 km:
+  0.0382 vs 0.0721). State it as "approximate, conservative at mid-range".
+- Independent hardware check: eps_b = 0.0005 reproduces the 100 km / 20 dB
+  reach specification of the LuxQuanta NOVA LQ Gen-2 commercial CV-QKD system
+  (this model gives 94 km / 18.8 dB). That a parameter calibrated on a 2019
+  research prototype lands on a 2025 commercial product's spec sheet is the
+  strongest single corroboration in the CV baseline.
+- Implied totals are consistent with the field literature once the distance
+  dependence is respected: 0.0133 SNU at 50 km sits inside the 5G fronthaul
+  field measurement of 0.0146 SNU at 13.2 km (arXiv:2104.04360) and Zhang 2020's
+  channel-input 0.0015-0.008 (arXiv:2001.02555).
+- **Sensitivity band: eps_b 5e-4 to 2e-3** (lo: Wang prototype calibration,
+  reach 94 km; hi: pessimistic deployed, reach 69 km). Secondary sweep on the
+  floor: eps_a + eps_l 0.003-0.008. Swept to the CV cutoff at eps_b ~ 5.8e-3
+  (xi_r ~ 0.101 SNU at 50 km).
+
+**Superseded conventions (kept for the audit trail).** Two earlier versions
+existed and BOTH are wrong; neither should be quoted:
+1. `xi_input = 2 * xi_bob / (T * eta)` with xi_bob = 0.015. The factor of 2 is
+   not in the QOSST reference, doubled the excess noise, and collapsed CV reach
+   to ~23 km.
+2. `xi_input = xi_bob / (T * eta)` with xi_bob = 0.015. Correct conversion, but
+   still a single-parameter model: no constant channel floor, and an implied
+   Bob-side term ~30x too large (2.5 SNU input-referred at 100 km against
+   Wang's measured ~0.098). Gave CV reach ~34 km and a ~18 km crossover.
+
+The Wang decomposition replaces both. All CV figures produced under either
+older form are superseded.
 
 ### CV reconciliation beta = 0.95
 
@@ -204,8 +268,10 @@ each distance (max over Va of the qosst-skr rate) rather than fixing one number.
   distance, where it runs to >100 SNU — not physically achievable on real
   modulators and below the distances where the comparison is contested.
 - **Cap Va <= 10 SNU** to reflect deployed hardware. This affects only the
-  0-1 km points (lowering them slightly); the DV/CV crossover (~18 km) and all
+  0-1 km points (lowering them slightly); the DV/CV crossover (~50 km) and all
   points from 5 km out are unchanged, as their optima already sit below 10 SNU.
+  Sanity check under the current noise model: the optimum converges to
+  Va = 3.712 at beta = 0.95, against Wang's published 3.71.
 
 ### Fibre attenuation = 0.20 dB/km (baseline); sweep motivated by Hollow-Core Fibre
 
@@ -292,10 +358,12 @@ being a more efficient protocol per channel use.
 2. **CV detector efficiency has stagnated** at ~0.6 for 13 years — a physics
    limit, not a closing gap.
 
-3. **Excess-noise convention:** xi is Bob-referred; code converts to channel
-   input via `xi_input = xi_bob / (T * eta)` (no factor of 2), matching QOSST's
-   documentation example and calibrated against QOSST's own calculator. See the
-   corrected NB under section 3 (CV excess noise) and caveat 7.
+3. **Excess-noise convention:** the qosst-skr `xi` argument is CHANNEL-INPUT
+   referred and is assembled per distance from the Wang Eq. 12 decomposition
+   (eps_a + eps_l constant floor, plus eps_b amplified by 1/(eta*T)). Total
+   excess noise is therefore an output, not an input. Detector electronic noise
+   is carried separately in `v_el` and must not also appear in xi. See section 3
+   (CV excess noise) and caveat 7.
 
 4. **Clock rates are not "fair" across protocols:** DV ~1 GHz, deployed CV
    ~5-100 MHz. This is hardware speed, not protocol. Bits-per-channel-use
@@ -305,7 +373,10 @@ being a more efficient protocol per channel use.
    orders of magnitude but leave Fig 2 unchanged. See section 4a.
 
 5. **These are baseline values for the sensitivity sweep**, not final claims.
-   The sweep (at ~15 km) varies each parameter around these baselines.
+   The sweep is run at **L = 50 km**, chosen to sit at the DV/CV crossover so
+   both protocols are competitive and the sweeps are informative. The test
+   distance moved with the crossover (15 -> 20 -> 50 km) as the CV noise model
+   was corrected; any text quoting 15 or 20 km is stale.
 
 6. **DV engine corrections (affects all DV numbers).** Three issues in the TNO
    path were found and fixed: (a) intrinsic QBER was not entering the rate
@@ -315,20 +386,46 @@ being a more efficient protocol per channel use.
    engine and applied post-hoc. With these fixed, DV carries its genuine 0.5% QBER
    and 0.95 reconciliation cost. All pre-fix DV figures are superseded.
 
-7. **CV excess-noise convention correction (affects all CV numbers).** The
-   Bob-to-channel-input conversion previously carried an erroneous factor of 2
-   (`2*xi_bob/(T*eta)`), making the excess noise 2x too high and collapsing the
-   CV range to ~23 km. The correct conversion is `xi_bob/(T*eta)` — matching
-   QOSST's own documented example and calibrated against QOSST's asymptotic
-   calculator (qosst-sim). With this fixed, CV reaches ~34 km at baseline and
-   the DV/CV crossover (bits/channel use) sits at ~18 km. All pre-fix CV figures
-   are superseded. NB: the CV engine assumes ideal Gaussian modulation (qosst-skr),
-   so it sits ~10-15% above QOSST's discrete-QAM reference — expected, and the
-   correct protocol-level idealisation (mirrors idealised decoy-BB84 for DV).
+7. **CV excess-noise model change (affects all CV numbers).** Two successive
+   corrections were made; only the second is current. (a) A spurious factor of 2
+   in the Bob-to-channel-input conversion was removed. (b) The whole
+   single-parameter form was then replaced by the Wang Eq. 12 decomposition,
+   because a constant xi has no channel floor and cannot reproduce CV's hard
+   distance ceiling — it implied ~2.5 SNU input-referred at 100 km against
+   ~0.098 SNU measured. All CV figures predating (b) are superseded. NB: the CV
+   engine assumes ideal Gaussian modulation (qosst-skr), so it sits ~10-15%
+   above QOSST's discrete-QAM reference — expected, and the correct
+   protocol-level idealisation (it mirrors idealised decoy-BB84 for DV).
 
-8. **Corrected headline results (post-fix, asymptotic, bits/channel use):**
-   DV/CV crossover ~18 km (CV wins below, DV above); CV reach ~34 km;
-   DV reach ~275 km; homodyne and heterodyne track within a few percent.
+8. **Current headline results** (asymptotic, bits/channel use; re-verified by
+   direct execution of the engines, August 2026):
+   - **DV/CV crossover ~50 km** at beta = 0.95 (49.9 km computed). CV wins
+     below, DV above. The crossover is **soft**: it spans **27.2-56.8 km**
+     across the deployed beta band 0.90-0.96, so quote it as a range, never as
+     a point.
+   - **CV reach 94.4 km** (homodyne and heterodyne agree to the nearest 0.1 km);
+     **DV reach 279.1 km**. Both robust to beta at the ±5% level.
+   - Homodyne and heterodyne track within a few percent throughout; at 50 km
+     homodyne is ~0.9% above heterodyne.
+   - The textbook 3 dB homodyne advantage does not survive realistic noise.
+
+8a. **Trusted-node budget — READ THE CONDITION.** CV needs **2.8-3.8x** more
+   trusted relays than DV across the six topologies, but this holds *only* at
+   **deployed clocks (DV 1 GHz, CV 100 MHz) with relay spacing sized to a
+   10 Mbps service target** (hop span: DV 65.0 km, CV 23.7 km). The condition is
+   load-bearing and must be stated wherever the ratio is quoted. Two traps:
+   - At **matched clocks** (both 1 GHz) with the same 10 Mbps target, the ratio
+     collapses to **~1.1x** (hop spans 65.0 vs 61.6 km). This is the degeneracy
+     documented in `net_common.py`: a common bits/s target maps to the same
+     per-channel-use threshold for both protocols, and 10 Mbps sits near where
+     the rate curves cross, so the criterion never looks at the region where the
+     protocols differ. It is not a finding that the protocols are equal.
+   - Under `--criterion reach` (relay only where a link would otherwise fail)
+     the ratio is **2.7-7.0x**, and is undefined for SAGO and CESNET because DV
+     needs zero relays there.
+   **`net_common.py` currently defaults to matched clocks** (`CV_CLOCK_HZ = 1e9`),
+   so running `topo_realscale_relays.py --criterion rate` bare reproduces the
+   1.1x figure, not 2.8-3.8x. Set `QKD_CV_CLOCK_HZ=100e6` for the deployed run.
 
 9. **Single baseline across two studies.** The point-to-point figures evaluate
    this baseline over 0-50 km; the network-topology study applies the same
@@ -386,6 +483,23 @@ detector/channel values, not reconciliation.)
   19201 (2016). Excess noise 0.015 at 100 km.
 - Telefonica/Huawei/UPM Madrid CV field trial on commercial fibre (2018).
 
+### CV excess-noise model (primary)
+- Wang, Huang, Wang, Huang, Zeng et al., "High key rate continuous-variable
+  quantum key distribution with a real local oscillator," Opt. Express 27,
+  13372 (2019). **Sec. 5, Eq. 12** is the excess-noise decomposition used
+  throughout; Table 2 / Fig. 8 give the measured prototype values the model is
+  calibrated against, and Fig. 1 the reach check. Audit-pinned conditions: with
+  constant xi = 0.01 (homodyne, eta 0.60, v_el 0.10, beta 0.95) the rate falls
+  below a 1e-9 bits/symbol floor at 404.6 km vs the paper's ~400 km; and the
+  optimal Va under that constant-xi configuration converges to 3.712 in the
+  LONG-DISTANCE limit (from ~200 km), matching Wang's 3.71 — at 50 km under the
+  Eq. 12 model the optimum is ~4.6, so 3.712 is the limit value, not a general
+  one. VERIFY the author
+  list and page against the publisher record before citing in the report.
+- LuxQuanta NOVA LQ Gen-2 commercial CV-QKD system: 100 km / 20 dB reach
+  specification — independent hardware corroboration of eps_b (this model:
+  94 km / 18.8 dB).
+
 ### CV engine / QOSST
 - Pietri et al., "QOSST: A Highly-Modular Open Source Platform for Experimental
   CV-QKD," Quantum 8, 1575 (2024), arXiv:2404.18637. The qosst-skr package used
@@ -395,7 +509,9 @@ detector/channel values, not reconciliation.)
 
 ### Context (lab records — used only to bound the sweep ranges)
 - 5G fronthaul CV-QKD field study, arXiv:2104.04360. 13.2 km urban link, total
-  excess noise xi = 0.0146 SNU at 250 MHz — corroborates xi = 0.015 baseline.
+  excess noise xi = 0.0146 SNU at 250 MHz — a TOTAL, so it corroborates the
+  assembled xi_r(T), not any single input parameter (this model gives 0.0133 SNU
+  at 50 km).
 - Silicon-photonics TBHD CV-QKD, arXiv:2305.03419. V_A = 5.8, v_el = 0.1,
   beta = 0.98; fibre TBHD efficiency 0.53, on-chip 0.28.
 - Shen et al., GC-LDPC reconciliation, Chin. Phys. B 29, 040301 (2020).

@@ -50,5 +50,5 @@ twin_plot3(RANGES['dv_qber']*100, dv, xb*1e3, cv_het, cv_hom,
            band_dv=(BAND['dv_qber'][0]*100, BAND['dv_qber'][1]*100),
            band_cv=(BAND['cv_xi_b'][0]*1e3, BAND['cv_xi_b'][1]*1e3),
            band_dv_label='DV deployed (0.5–2.1%)',
-           band_cv_label='CV deployed (0.5–2.0 $\\times10^{-3}$ SNU)',
+           band_cv_label='CV sweep range (0.5–2.0 $\\times10^{-3}$ SNU)',
            legend_loc='lower left', output_dir=args.output_dir)
