@@ -406,6 +406,54 @@ plt.tight_layout()
 plt.savefig('figure4_bits_per_second.png', dpi=150, bbox_inches='tight')
 print("Saved: figure4_bits_per_second.png")
 
+#===========================================================
+# FIGURE A1: repeaterless (PLOB) bound check  [Appendix]
+# ============================================================
+# Eq. (2): R <= -log2(1 - T). Diverges at L = 0 (T = 1), so L = 0 is skipped.
+with np.errstate(divide='ignore'):
+    plob_bound = -np.log2(1.0 - T_of_L(DISTANCES_KM))
+
+print("\nRepeaterless (PLOB) bound check:")
+for name, rates in [("DV decoy BB84", dv_rates),
+                    ("CV heterodyne", cv_het_rates),
+                    ("CV homodyne", cv_hom_rates)]:
+    m = (rates > RATE_FLOOR) & np.isfinite(plob_bound)
+    ratio = plob_bound[m] / rates[m]
+    j = int(np.argmin(ratio))
+    n_viol = int(np.sum(rates[m] > plob_bound[m]))
+    print(f"  {name:14s} closest approach: bound/rate = {ratio[j]:6.2f} "
+          f"at {DISTANCES_KM[m][j]:5.1f} km | violations: {n_viol}")
+
+figA, (axA1, axA2) = plt.subplots(1, 2, figsize=(13, 5.5))
+
+# (a) DV
+axA1.semilogy(DISTANCES_KM[1:], plob_bound[1:], 'k:', linewidth=2.0,
+              label=r'PLOB bound $-\log_2(1-T)$')
+axA1.semilogy(DISTANCES_KM[mask_dv], dv_rates[mask_dv], 'b-', linewidth=2.5,
+              label='DV: Decoy BB84 (TNO)')
+axA1.set_title('(a) DV: decoy-state BB84', fontsize=12)
+axA1.set_xlim(0, 320)
+
+# (b) CV
+axA2.semilogy(DISTANCES_KM[1:], plob_bound[1:], 'k:', linewidth=2.0,
+              label=r'PLOB bound $-\log_2(1-T)$')
+axA2.semilogy(DISTANCES_KM[mask_het], cv_het_rates[mask_het], 'r-', linewidth=2.5,
+              label='CV: GG02 Heterodyne (qosst-skr)')
+axA2.semilogy(DISTANCES_KM[mask_hom], cv_hom_rates[mask_hom], 'm--', linewidth=2.5,
+              label='CV: GG02 Homodyne (qosst-skr)')
+axA2.set_title('(b) CV: GG02', fontsize=12)
+axA2.set_xlim(0, 100)
+
+for ax in (axA1, axA2):
+    ax.set_xlabel('Distance (km)', fontsize=12)
+    ax.set_ylabel('Secret key rate (bits per channel use)', fontsize=12)
+    ax.set_ylim(RATE_FLOOR, 10)
+    ax.legend(fontsize=10, loc='lower left')
+    ax.grid(True, alpha=0.3, which='both')
+
+plt.tight_layout()
+plt.savefig('appendix_plob_check.png', dpi=150, bbox_inches='tight')
+print("Saved: appendix_plob_check.png")
 
 # ============================================================
 # PRINT TABULAR RESULTS
