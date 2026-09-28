@@ -1,62 +1,47 @@
 """
-uncertainty_analysis.py — uncertainty quantification and global sensitivity
-analysis for the DV/CV comparison.
+uncertainty_analysis.py — global uncertainty quantification for the DV/CV
+comparison.
 
-WHAT THIS ANSWERS. The sensitivity sweeps (s1..s6) vary one parameter at a time
-around a fixed baseline. That identifies which parameter matters but says
-nothing about what the headline numbers are worth when every parameter is
-uncertain at once, which is the situation an operator is actually in. This
-module samples the full joint parameter space over the deployed bands and
-propagates it through to the quantities the report reports:
+The s1..s6 sweeps vary one parameter at a time. This module samples the full
+joint parameter space over the deployed bands and propagates it through to:
 
-    crossover distance          where the advantage passes from CV to DV
-    DV usable reach             at the Eq.(RSKR) floor
-    CV usable reach             at the same floor
-    span ratio  DV/CV           the driver of the trusted-node budget
+    crossover distance          where CV loses its advantage to DV
+    DV / CV usable reach        at the RSKR floor (see THE FLOOR below)
+    span ratio  DV/CV           driver of the trusted-node budget
     relay counts per topology   the trusted-node budget itself
-    relay ratio CV/DV           the headline of the work
+    relay ratio CV/DV           headline of the work
 
-and then asks three questions of the result: how wide are the distributions,
-which inputs drive them, and why is the span ratio narrower than the crossover.
+METHOD. Latin hypercube sampling over sens_common.BAND (scrambled, seeded),
+uniform priors except log-uniform dark count. Two departures noted at PRIORS:
+alpha uses deployed fibre (not the hollow-core sweep axis), and dv_eta is Bob's
+TOTAL receiver efficiency (what TNO's efficiency_party consumes). Parameters
+are drawn independently — vendor correlations would narrow the distributions,
+so results are conservative. Percentiles carry bootstrap CIs; sensitivity uses
+standardised rank regression coefficients (SRRC) with R^2 reported alongside.
 
-METHOD.
-  Sampling      Latin hypercube over the deployed bands of Table 2, scrambled
-                and seeded. LHS is used rather than plain Monte Carlo because
-                it stratifies every marginal, so a given accuracy needs roughly
-                an order of magnitude fewer engine evaluations -- and the DV
-                engine costs ~64 ms per call, which is what bounds this study.
-  Priors        Uniform over each band, except the dark-count rate, which is
-                log-uniform because its band spans three decades and a uniform
-                draw would place 90% of the mass in the top decade. Bands are
-                the deployed ranges cited in Table 2. NOTE that alpha uses the
-                deployed fibre band (0.18-0.21), NOT the wider hollow-core
-                sweep axis, which is a what-if rather than a deployed range.
-  Independence  Parameters are drawn independently. This is a real assumption:
-                detector efficiency and electronic noise are plausibly
-                correlated within a vendor's product line, and correlation
-                would narrow the output distributions relative to what is
-                reported here. The results are therefore conservative.
-  Estimators    Percentiles with bootstrap confidence intervals, so the
-                reported uncertainty carries its own uncertainty.
-  Sensitivity   Standardised rank regression coefficients (SRRC) with the rank
-                model's R^2 reported alongside. SRRC is used rather than raw
-                correlation because it accounts for the other inputs, and rank
-                rather than linear because the responses are monotone but not
-                linear. Where R^2 is low the SRRC values should be distrusted
-                and a variance-based method used instead.
+THE FLOOR. Reach is quoted at a usability floor per Nweke et al. (arXiv:
+2306.15031): default 256 bit/s (~one AES-256 key/s). CV's rate-distance curve
+falls vertically at its limit, DV's decays gently, so raising the floor is a
+DV-only handicap. At baseline the span ratio runs 3.21 (zero-rate), 3.17
+(20 bit/s), 2.94 (256), 2.70 (1 kbit/s), 2.25 (10 kbit/s). Sweep with
+--floor-bps and quote the range.
 
-RESUMABILITY. One sample costs ~1.9 s, almost all of it in the DV engine's
-intensity optimisation. The design is generated up front for --max-samples and
-evaluated incrementally, appending each completed row to the CSV, so the run
-can be stopped and restarted and will continue where it left off. Analysis
-reads the CSV, so it can be run at any point.
+BASELINE. DV: Clason et al. 2026 (ID281 SNSPD, 300 km trusted-node trial) with
+Mueller et al. 2024 error correction. CV: Wang et al. 2019 (only source for the
+eps_a/eps_b Eq. 12 decomposition). DV f_EC and CV beta are NOT matched.
+
+RESUMABILITY. ~1.9 s/sample (DV intensity opt dominates). Design is generated
+up front and evaluated incrementally, appending each row to the CSV; runs can
+be stopped and resumed. Resume keys off row count only — a header schema check
+guards column names but not band changes. Delete uncertainty_samples.csv after
+any baseline change.
 
 USAGE
-    python uncertainty_analysis.py --samples 128           # sample, then analyse
-    python uncertainty_analysis.py --samples 512           # continue to 512
-    python uncertainty_analysis.py --analyse-only          # re-analyse, no sampling
-    python uncertainty_analysis.py --samples 2048 --max-samples 2048
+    python uncertainty_analysis.py --samples 128
+    python uncertainty_analysis.py --samples 512      # resume to 512
+    python uncertainty_analysis.py --analyse-only
 """
+
 import argparse
 import os
 import sys
@@ -89,18 +74,37 @@ _add_module_paths("sens_common", "topo_loader")
 # --------------------------------------------------------------------------
 # name          -> (low, high, scale, applies_to)
 PRIORS = {
-    "dv_eta":  (0.65,   0.93,   "lin", "DV"),   # deployed SNSPD efficiency
-    "dv_dark": (1.0,    1000.0, "log", "DV"),   # dark counts, cps, 3 decades
-    "dv_qber": (0.005,  0.021,  "lin", "DV"),   # intrinsic error rate
-    "dv_beta": (0.90,   0.96,   "lin", "DV"),   # reconciliation efficiency
-    "cv_eta":  (0.60,   0.72,   "lin", "CV"),   # deployed coherent receiver
-    "cv_vel":  (0.015,  0.11,   "lin", "CV"),   # electronic noise, SNU
-    "cv_xib":  (0.0005, 0.002,  "lin", "CV"),   # Bob-side excess noise, SNU
-    "cv_beta": (0.90,   0.96,   "lin", "CV"),   # reconciliation efficiency
-    "alpha":   (0.18,   0.21,   "lin", "both"), # deployed fibre attenuation
+
+    "dv_eta":  (0.411,  0.731,  "lin", "DV"),
+
+    "dv_dark": (1.0,    70.0,   "log", "DV"),
+
+    "dv_qber": (0.005,  0.018,  "lin", "DV"),
+
+    "dv_f_ec": (1.036,  1.20,   "lin", "DV"),
+
+    "cv_eta":  (0.56,   0.68,   "lin", "CV"),
+
+    "cv_vel":  (0.01,   0.27,   "lin", "CV"),
+
+    "cv_xib":  (0.0001, 0.002,  "lin", "CV"),
+
+    "cv_beta": (0.90,   0.96,   "lin", "CV"),
+
+    "alpha":   (0.19,   0.23,   "lin", "both"),
 }
 OUTPUTS = ["crossover_km", "dv_reach_km", "cv_reach_km", "span_ratio"]
 TOPOLOGIES = ["TATANID", "SAGO", "GERMANY50", "CESNET", "LAYER42", "RNPBRAZIL"]
+
+# Search brackets for the root-finds below. These are not cosmetic: a bracket
+# that is too narrow silently records draws as nan and truncates a tail of the
+# reported distribution. Checked against the band corners (see _check_brackets):
+# at a 256 bit/s floor: crossover 20-133 km, DV usable reach up to 271 km,
+# CV usable reach up to 140 km. Re-run --check-brackets after changing the floor,
+# since a lower floor lengthens both reaches.
+CROSSOVER_BRACKET = (2.0, 200.0)
+DV_REACH_BRACKET = (1.0, 400.0)
+CV_REACH_BRACKET = (1.0, 300.0)
 
 
 # --------------------------------------------------------------------------
@@ -121,23 +125,28 @@ def _bisect(f, thr, lo, hi, iters):
     return 0.5 * (lo + hi)
 
 
-def evaluate(p, floor_bps=1e3, clock_hz=1e9, iters=14):
-    """Run the two engines at one parameter draw. Returns a dict of outputs."""
+def _engines(p):
+    """Return (DV, CV) rate functions of distance for one parameter draw."""
     from sens_common import dv_rate, cv_rate, DARK_CPS_TO_PERGATE
-    thr = floor_bps / clock_hz          # floor in bits per channel use
-
     DV = lambda L: dv_rate(L_km=L, eta=p["dv_eta"], alpha=p["alpha"],
                            dark_pergate=p["dv_dark"] * DARK_CPS_TO_PERGATE,
-                           qber=p["dv_qber"], beta=p["dv_beta"])
+                           qber=p["dv_qber"], f_ec=p["dv_f_ec"])
     CV = lambda L: cv_rate(L_km=L, eta=p["cv_eta"], alpha=p["alpha"],
                            vel=p["cv_vel"], xi_b=p["cv_xib"],
                            beta=p["cv_beta"], detection="heterodyne")
+    return DV, CV
+
+
+def evaluate(p, floor_bps=256.0, clock_hz=1e9, iters=14):
+    """Run the two engines at one parameter draw. Returns a dict of outputs."""
+    thr = floor_bps / clock_hz          # floor in bits per channel use
+    DV, CV = _engines(p)
 
     # crossover: the distance at which CV stops leading. Bracketed rather than
-    # assumed, so a draw in which CV never leads (or always leads out to its
-    # cutoff) is recorded as nan instead of returning a bracket endpoint.
+    # assumed, so a draw in which CV never leads (or still leads at the top of
+    # the bracket) is recorded as nan instead of returning a bracket endpoint.
     diff = lambda L: CV(L) - DV(L)
-    lo, hi = 2.0, 120.0
+    lo, hi = CROSSOVER_BRACKET
     if diff(lo) <= 0 or diff(hi) > 0:
         crossover = np.nan
     else:
@@ -149,11 +158,58 @@ def evaluate(p, floor_bps=1e3, clock_hz=1e9, iters=14):
                 hi = mid
         crossover = 0.5 * (lo + hi)
 
-    dv_reach = _bisect(DV, thr, 1.0, 400.0, iters)
-    cv_reach = _bisect(CV, thr, 1.0, 300.0, iters)
+    dv_reach = _bisect(DV, thr, *DV_REACH_BRACKET, iters)
+    cv_reach = _bisect(CV, thr, *CV_REACH_BRACKET, iters)
     return dict(crossover_km=crossover, dv_reach_km=dv_reach,
                 cv_reach_km=cv_reach,
                 span_ratio=dv_reach / cv_reach if cv_reach else np.nan)
+
+
+def _check_brackets(floor_bps=256.0, clock_hz=1e9):
+    """Evaluate the band corners to confirm the brackets are wide enough.
+
+    Run with --check-brackets after any change to PRIORS. A corner that lands on
+    or outside a bracket means that region of parameter space is being recorded
+    as nan, which biases the reported distribution without any warning.
+    """
+    thr = floor_bps / clock_hz
+    cv_best = dict(dv_eta=PRIORS["dv_eta"][0], dv_dark=PRIORS["dv_dark"][1],
+                   dv_qber=PRIORS["dv_qber"][1], dv_f_ec=PRIORS["dv_f_ec"][1],
+                   cv_eta=PRIORS["cv_eta"][1], cv_vel=PRIORS["cv_vel"][0],
+                   cv_xib=PRIORS["cv_xib"][0], cv_beta=PRIORS["cv_beta"][1],
+                   alpha=PRIORS["alpha"][0])
+    dv_best = dict(dv_eta=PRIORS["dv_eta"][1], dv_dark=PRIORS["dv_dark"][0],
+                   dv_qber=PRIORS["dv_qber"][0], dv_f_ec=PRIORS["dv_f_ec"][0],
+                   cv_eta=PRIORS["cv_eta"][0], cv_vel=PRIORS["cv_vel"][1],
+                   cv_xib=PRIORS["cv_xib"][1], cv_beta=PRIORS["cv_beta"][0],
+                   alpha=PRIORS["alpha"][1])
+    print("Bracket check at the band corners")
+    rows = []
+    for lab, p in (("most CV-favourable", cv_best), ("most DV-favourable", dv_best)):
+        DV, CV = _engines(p)
+        out = evaluate(p, floor_bps=floor_bps, clock_hz=clock_hz, iters=40)
+        rows.append((lab, out))
+        print(f"   {lab:20s} crossover {out['crossover_km']:8.1f} km   "
+              f"DV reach {out['dv_reach_km']:7.1f} km   "
+              f"CV reach {out['cv_reach_km']:7.1f} km")
+    print(f"   brackets: crossover {CROSSOVER_BRACKET}, "
+          f"DV reach {DV_REACH_BRACKET}, CV reach {CV_REACH_BRACKET}")
+    ok = True
+    for lab, out in rows:
+        if np.isnan(out["crossover_km"]):
+            print(f"   [!] {lab}: crossover is nan — widen CROSSOVER_BRACKET")
+            ok = False
+        elif out["crossover_km"] > 0.95 * CROSSOVER_BRACKET[1]:
+            print(f"   [!] {lab}: crossover within 5% of the bracket ceiling")
+            ok = False
+        for key, br in (("dv_reach_km", DV_REACH_BRACKET),
+                        ("cv_reach_km", CV_REACH_BRACKET)):
+            if out[key] > 0.95 * br[1]:
+                print(f"   [!] {lab}: {key} within 5% of its bracket ceiling")
+                ok = False
+    print("   " + ("all corners comfortably inside their brackets" if ok
+                   else "WIDEN THE FLAGGED BRACKETS BEFORE SAMPLING"))
+    return ok
 
 
 # --------------------------------------------------------------------------
@@ -178,7 +234,18 @@ def sample(csv_path, n_target, max_n, seed, floor_bps):
     done = 0
     if os.path.exists(csv_path):
         with open(csv_path) as fh:
-            done = max(sum(1 for _ in fh) - 1, 0)
+            first = fh.readline().strip()
+            done = max(sum(1 for _ in fh), 0)
+        # Guard against resuming onto a file written under different columns.
+        # This catches a renamed parameter (dv_beta -> dv_f_ec) but NOT a changed
+        # band, so delete the CSV after any baseline change regardless.
+        if first.split(",") != header:
+            sys.exit(
+                f"{os.path.basename(csv_path)} has a different column set:\n"
+                f"   file:     {first}\n"
+                f"   expected: {','.join(header)}\n"
+                "Delete it and resample. (Note a changed BAND cannot be detected "
+                "this way, so delete after any baseline change.)")
         print(f"resuming: {done} samples already in {os.path.basename(csv_path)}")
     else:
         with open(csv_path, "w") as fh:
@@ -218,15 +285,23 @@ def srrc(X, y, names):
     linear; standardising makes the coefficients comparable across inputs of
     different units. R^2 says how much of the rank variance the additive model
     explains: if it is low, interactions matter and these numbers understate.
+
+    Inputs with zero rank variance (a degenerate prior) are dropped rather than
+    dividing by zero.
     """
     from scipy.stats import rankdata
     R = np.column_stack([rankdata(X[:, j]) for j in range(X.shape[1])])
     r = rankdata(y)
-    Rz = (R - R.mean(0)) / R.std(0)
+    sd = R.std(0)
+    keep = sd > 0
+    Rz = (R[:, keep] - R[:, keep].mean(0)) / sd[keep]
     rz = (r - r.mean()) / r.std()
     beta, *_ = np.linalg.lstsq(Rz, rz, rcond=None)
     r2 = 1 - np.sum((rz - Rz @ beta) ** 2) / np.sum(rz ** 2)
-    return dict(zip(names, beta)), r2
+    coef = dict.fromkeys(names, 0.0)
+    for nm, b in zip([n for n, k in zip(names, keep) if k], beta):
+        coef[nm] = b
+    return coef, r2
 
 
 def convergence(x, step=16):
@@ -248,10 +323,13 @@ def relay_budget(dv_span, cv_span):
     """
     from topo_loader import load_topology
     res = {}
+    ok = np.isfinite(dv_span) & np.isfinite(cv_span) & (dv_span > 0) & (cv_span > 0)
     for name in TOPOLOGIES:
         L = np.asarray(load_topology(name)["edge_len_km"], dtype=float)
-        dv = np.array([np.ceil(L / s).sum() - len(L) for s in dv_span])
-        cv = np.array([np.ceil(L / s).sum() - len(L) for s in cv_span])
+        dv = np.full(len(dv_span), np.nan)
+        cv = np.full(len(cv_span), np.nan)
+        dv[ok] = [np.ceil(L / s).sum() - len(L) for s in dv_span[ok]]
+        cv[ok] = [np.ceil(L / s).sum() - len(L) for s in cv_span[ok]]
         res[name] = (dv, cv)
     return res
 
@@ -259,13 +337,17 @@ def relay_budget(dv_span, cv_span):
 # --------------------------------------------------------------------------
 # reporting
 # --------------------------------------------------------------------------
-def analyse(csv_path, out_dir, seed=0):
+def analyse(csv_path, out_dir, seed=0, floor_bps=256.0):
     import csv as _csv
     with open(csv_path) as fh:
         rows = list(_csv.DictReader(fh))
     if not rows:
         sys.exit("no samples yet; run with --samples first")
     names = list(PRIORS)
+    missing = [k for k in names + OUTPUTS if k not in rows[0]]
+    if missing:
+        sys.exit(f"{os.path.basename(csv_path)} is missing columns {missing}; "
+                 "it was written under a different baseline. Delete and resample.")
     X = np.array([[float(r[k]) for k in names] for r in rows])
     Y = {k: np.array([float(r[k]) for r in rows]) for k in OUTPUTS}
     n = len(rows)
@@ -276,9 +358,19 @@ def analyse(csv_path, out_dir, seed=0):
     add(f"UNCERTAINTY ANALYSIS — {n} Latin hypercube samples over the deployed bands")
     add("=" * 78)
     add("")
+    add(f"Usability floor: {floor_bps:g} bit/s at a 1 GHz clock "
+        f"({floor_bps/256:.2f} AES-256 keys/s). Reaches below are USABLE reaches at")
+    add("this floor, NOT zero-rate distances, so they are shorter than the")
+    add("zero-rate figures quoted elsewhere (baseline DV 303.4 km zero-rate vs")
+    add(f"{'277.5' if abs(floor_bps-256)<1 else '---'} km at 256 bit/s). The floor penalises DV only: CV's curve is")
+    add("vertical at its limit, DV's is not. See THE FLOOR in the module docstring.")
+    add("")
     add("Priors (independent; see module docstring for the independence caveat)")
     for k, (lo, hi, sc, who) in PRIORS.items():
         add(f"   {k:9s} {who:4s} {sc}-uniform  [{lo:g}, {hi:g}]")
+    add("")
+    add("   NB dv_f_ec is an error-correction efficiency: LARGER IS WORSE, the")
+    add("   opposite sense to cv_beta. Signs in section 3 read accordingly.")
     add("")
 
     # ---- 1. marginals -----------------------------------------------------
@@ -288,23 +380,31 @@ def analyse(csv_path, out_dir, seed=0):
     add(f"{'quantity':16s} {'n':>4s} {'median':>9s} {'  95% CI':>16s} "
         f"{'p5':>8s} {'p95':>8s} {'CoV':>7s}")
     for k in OUTPUTS:
-        v = Y[k][~np.isnan(Y[k])]
+        v = Y[k][np.isfinite(Y[k])]
+        if not len(v):
+            add(f"{k:16s} {0:4d}   all draws nan — check the brackets")
+            continue
         med = np.median(v)
         ci = boot_ci(v, np.median, seed=seed)
         add(f"{k:16s} {len(v):4d} {med:9.2f} [{ci[0]:6.2f},{ci[1]:6.2f}] "
             f"{np.percentile(v,5):8.2f} {np.percentile(v,95):8.2f} "
             f"{v.std()/v.mean():7.3f}")
-    nan_x = int(np.isnan(Y['crossover_km']).sum())
+    nan_x = int((~np.isfinite(Y['crossover_km'])).sum())
     if nan_x:
-        add(f"\n   {nan_x} draw(s) had no crossover inside [2,120] km and are excluded")
-        add("   from the crossover row only (CV never led, or still led at 120 km).")
+        lo_b, hi_b = CROSSOVER_BRACKET
+        add(f"\n   {nan_x} of {n} draw(s) had no crossover inside "
+            f"[{lo_b:g},{hi_b:g}] km and are excluded from the crossover row only")
+        add("   (CV never led, or still led at the top of the bracket). If this")
+        add("   count is more than a few percent, widen CROSSOVER_BRACKET — the")
+        add("   excluded draws are a truncated tail, not genuinely missing data.")
     add("")
 
     # ---- 2. why the ratio is tighter -------------------------------------
     add("-" * 78)
     add("2. VARIANCE DECOMPOSITION — why the span ratio beats the crossover")
     add("-" * 78)
-    ld, lc = np.log(Y["dv_reach_km"]), np.log(Y["cv_reach_km"])
+    fin = np.isfinite(Y["dv_reach_km"]) & np.isfinite(Y["cv_reach_km"])
+    ld, lc = np.log(Y["dv_reach_km"][fin]), np.log(Y["cv_reach_km"][fin])
     vd, vc, cov = ld.var(), lc.var(), np.cov(ld, lc)[0, 1]
     add(f"   Var(ln DV reach)            {vd:.5f}")
     add(f"   Var(ln CV reach)            {vc:.5f}")
@@ -312,11 +412,13 @@ def analyse(csv_path, out_dir, seed=0):
     add(f"   Var(ln ratio) = sum         {vd+vc-2*cov:.5f}")
     add(f"   vs sum without cancellation {vd+vc:.5f}"
         f"   -> cancellation removes {100*(1-(vd+vc-2*cov)/(vd+vc)):.1f}%")
-    cvx = Y["crossover_km"][~np.isnan(Y["crossover_km"])]
+    cvx = Y["crossover_km"][np.isfinite(Y["crossover_km"])]
+    sr = Y["span_ratio"][np.isfinite(Y["span_ratio"])]
     add("")
-    add(f"   coefficient of variation:  crossover {cvx.std()/cvx.mean():.3f}   "
-        f"span ratio {Y['span_ratio'].std()/Y['span_ratio'].mean():.3f}   "
-        f"-> ratio is {(cvx.std()/cvx.mean())/(Y['span_ratio'].std()/Y['span_ratio'].mean()):.1f}x tighter")
+    if len(cvx) and len(sr):
+        add(f"   coefficient of variation:  crossover {cvx.std()/cvx.mean():.3f}   "
+            f"span ratio {sr.std()/sr.mean():.3f}   "
+            f"-> ratio is {(cvx.std()/cvx.mean())/(sr.std()/sr.mean()):.1f}x tighter")
     add("")
     add("   A ratio cancels any input that moves both protocols the same way; a")
     add("   crossover is a difference of two curves and inherits both variances.")
@@ -327,7 +429,10 @@ def analyse(csv_path, out_dir, seed=0):
     add("3. GLOBAL SENSITIVITY — standardised rank regression coefficients")
     add("-" * 78)
     for k in OUTPUTS:
-        m = ~np.isnan(Y[k])
+        m = np.isfinite(Y[k])
+        if m.sum() < len(names) + 2:
+            add(f"\n   {k}   too few finite draws for a regression")
+            continue
         coef, r2 = srrc(X[m], Y[k][m], names)
         add(f"\n   {k}   (rank model R^2 = {r2:.3f}"
             f"{'  — LOW, treat with caution' if r2 < 0.7 else ''})")
@@ -344,7 +449,7 @@ def analyse(csv_path, out_dir, seed=0):
     add("-" * 78)
     add(f"{'quantity':16s} {'N/4':>18s} {'N/2':>18s} {'N':>18s}")
     for k in OUTPUTS:
-        v = Y[k][~np.isnan(Y[k])]
+        v = Y[k][np.isfinite(Y[k])]
         c = convergence(v, step=max(len(v) // 4, 1))
         if len(c) >= 4:
             cells = [f"{c[i][1]:8.2f} +/-{c[i][2]/2:6.2f}" for i in (0, 1, 3)]
@@ -361,20 +466,23 @@ def analyse(csv_path, out_dir, seed=0):
         rb = relay_budget(Y["dv_reach_km"], Y["cv_reach_km"])
         add(f"{'topology':11s} {'DV relays':>18s} {'CV relays':>18s} {'CV/DV ratio':>20s}")
         add(f"{'':11s} {'median [p5,p95]':>18s} {'median [p5,p95]':>18s} {'median [p5,p95]':>20s}")
-        tot_d = np.zeros(n); tot_c = np.zeros(n)
+        tot_d = np.zeros(n)
+        tot_c = np.zeros(n)
         for t in TOPOLOGIES:
-            d, c = rb[t]; tot_d += d; tot_c += c
+            d, c = rb[t]
+            tot_d += np.nan_to_num(d)
+            tot_c += np.nan_to_num(c)
             rr = np.where(d > 0, c / np.maximum(d, 1), np.nan)
             rs = ("undefined (DV needs 0)" if np.all(np.isnan(rr))
                   else f"{np.nanmedian(rr):5.2f} [{np.nanpercentile(rr,5):.2f},{np.nanpercentile(rr,95):.2f}]")
-            add(f"{t:11s} {np.median(d):6.0f} [{np.percentile(d,5):.0f},{np.percentile(d,95):.0f}]"
-                f"{'':4s} {np.median(c):6.0f} [{np.percentile(c,5):.0f},{np.percentile(c,95):.0f}]"
+            add(f"{t:11s} {np.nanmedian(d):6.0f} [{np.nanpercentile(d,5):.0f},{np.nanpercentile(d,95):.0f}]"
+                f"{'':4s} {np.nanmedian(c):6.0f} [{np.nanpercentile(c,5):.0f},{np.nanpercentile(c,95):.0f}]"
                 f"{'':4s} {rs:>20s}")
-        tr = tot_c / tot_d
+        tr = np.where(tot_d > 0, tot_c / np.maximum(tot_d, 1), np.nan)
         add("")
         add(f"{'TOTAL':11s} {np.median(tot_d):6.0f} [{np.percentile(tot_d,5):.0f},{np.percentile(tot_d,95):.0f}]"
             f"{'':4s} {np.median(tot_c):6.0f} [{np.percentile(tot_c,5):.0f},{np.percentile(tot_c,95):.0f}]"
-            f"{'':4s} {np.median(tr):5.2f} [{np.percentile(tr,5):.2f},{np.percentile(tr,95):.2f}]")
+            f"{'':4s} {np.nanmedian(tr):5.2f} [{np.nanpercentile(tr,5):.2f},{np.nanpercentile(tr,95):.2f}]")
         add("")
         add("   This is the headline of the work carried through the full joint")
         add("   parameter uncertainty rather than quoted at a single baseline.")
@@ -408,18 +516,23 @@ def _figure(X, Y, names, out_dir, seed):
     # (a) crossover vs (b) span ratio, the central comparison
     for a, k, col, lab in ((ax[0, 0], "crossover_km", "#c0392b", "Crossover (km)"),
                            (ax[0, 1], "span_ratio", "#1f4e9c", "Span ratio DV/CV")):
-        v = Y[k][~np.isnan(Y[k])]
+        v = Y[k][np.isfinite(Y[k])]
+        if not len(v):
+            a.text(.5, .5, "no finite draws", ha="center", transform=a.transAxes)
+            continue
         a.hist(v, bins=28, color=col, alpha=.75, edgecolor="white", linewidth=.5)
         for q, ls in ((5, ":"), (50, "-"), (95, ":")):
             a.axvline(np.percentile(v, q), color="k", ls=ls, lw=1.2)
-        a.set_xlabel(lab); a.set_ylabel("samples")
+        a.set_xlabel(lab)
+        a.set_ylabel("samples")
         a.set_title(f"{lab}: median {np.median(v):.2f}, "
                     f"5–95% [{np.percentile(v,5):.2f}, {np.percentile(v,95):.2f}]\n"
                     f"CoV = {v.std()/v.mean():.3f}", fontsize=10.5)
         a.grid(alpha=.25)
 
     # (c) tornado for the span ratio
-    coef, r2 = srrc(X, Y["span_ratio"], names)
+    m = np.isfinite(Y["span_ratio"])
+    coef, r2 = srrc(X[m], Y["span_ratio"][m], names)
     items = sorted(coef.items(), key=lambda t: abs(t[1]))
     ax[1, 0].barh([i[0] for i in items], [i[1] for i in items],
                   color=["#c0392b" if v < 0 else "#1f4e9c" for _, v in items])
@@ -430,13 +543,17 @@ def _figure(X, Y, names, out_dir, seed):
 
     # (d) convergence of both headline quantities
     for k, col in (("crossover_km", "#c0392b"), ("span_ratio", "#1f4e9c")):
-        v = Y[k][~np.isnan(Y[k])]
+        v = Y[k][np.isfinite(Y[k])]
+        if len(v) < 8:
+            continue
         c = convergence(v, step=max(len(v) // 20, 4))
         ax[1, 1].plot(c[:, 0], c[:, 2] / np.median(v), "-o", ms=3, color=col,
                       label=f"{k} (90% width / median)")
-    ax[1, 1].set_xlabel("samples"); ax[1, 1].set_ylabel("relative 90% interval width")
+    ax[1, 1].set_xlabel("samples")
+    ax[1, 1].set_ylabel("relative 90% interval width")
     ax[1, 1].set_title("Convergence", fontsize=10.5)
-    ax[1, 1].legend(fontsize=8.5); ax[1, 1].grid(alpha=.25)
+    ax[1, 1].legend(fontsize=8.5)
+    ax[1, 1].grid(alpha=.25)
 
     fig.suptitle("Joint parameter uncertainty over the deployed bands",
                  fontsize=13, weight="bold")
@@ -451,17 +568,24 @@ def main():
     ap.add_argument("--max-samples", type=int, default=4096,
                     help="size of the fixed LHS design; keep constant across runs")
     ap.add_argument("--seed", type=int, default=20260805)
-    ap.add_argument("--floor-bps", type=float, default=1e3,
-                    help="usability floor in bit/s at the matched clock")
+    ap.add_argument("--floor-bps", type=float, default=256.0,
+                    help="usability floor in bit/s at the matched clock "
+                         "(default 256 = one AES-256 key per second)")
     ap.add_argument("--output-dir", type=str, default="uncertainty")
     ap.add_argument("--analyse-only", action="store_true")
+    ap.add_argument("--check-brackets", action="store_true",
+                    help="evaluate the band corners and exit; run after any "
+                         "change to PRIORS")
     a = ap.parse_args()
+
+    if a.check_brackets:
+        sys.exit(0 if _check_brackets(floor_bps=a.floor_bps) else 1)
 
     os.makedirs(a.output_dir, exist_ok=True)
     csv_path = os.path.join(a.output_dir, "uncertainty_samples.csv")
     if not a.analyse_only:
         sample(csv_path, a.samples, a.max_samples, a.seed, a.floor_bps)
-    analyse(csv_path, a.output_dir, seed=a.seed)
+    analyse(csv_path, a.output_dir, seed=a.seed, floor_bps=a.floor_bps)
 
 
 if __name__ == "__main__":

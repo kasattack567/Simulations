@@ -19,7 +19,7 @@ super-linearly. This is the clearest new result in the sensitivity suite.
 Deterministic engines -> no error bars.
 """
 import numpy as np
-from sens_common import (dv_rate, cv_rate, cv_xi_input, T_of_L, shared_plot3,
+from sens_common import (band_label, dv_rate, cv_rate, cv_xi_input, T_of_L, shared_plot3,
                          arg_common, RANGES, BAND, BAND_SH)
 
 args = arg_common()
@@ -37,5 +37,5 @@ shared_plot3(a, dv, cv_het, cv_hom,
              'Fibre attenuation  $\\alpha$  (dB/km)',
              f'Key rate vs fibre attenuation   ($L = {L:.0f}$ km)',
              's3_fibre_atten.png',
-             bands=[(BAND['alpha'], BAND_SH, 'HCF (0.091) → silica (0.20)')],
+             bands=[(BAND['alpha'], BAND_SH, band_label('alpha'))],
              output_dir=args.output_dir)

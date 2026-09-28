@@ -22,7 +22,7 @@ DV QBER swept to its ~11% BB84 cutoff. Crossings across the two axes are NOT
 physically meaningful. No error bars.
 """
 import numpy as np
-from sens_common import (dv_rate, cv_rate, cv_xi_input, T_of_L, twin_plot3,
+from sens_common import (band_label, band_scaled, dv_rate, cv_rate, cv_xi_input, T_of_L, twin_plot3,
                          arg_common, RANGES, BAND)
 
 args = arg_common()
@@ -47,8 +47,8 @@ twin_plot3(RANGES['dv_qber']*100, dv, xb*1e3, cv_het, cv_hom,
            'CV Bob-side excess noise  $\\epsilon_b$  ($10^{-3}$ SNU)',
            f'Key rate vs channel noise   ($L = {L:.0f}$ km)',
            's5_channel_noise.png',
-           band_dv=(BAND['dv_qber'][0]*100, BAND['dv_qber'][1]*100),
-           band_cv=(BAND['cv_xi_b'][0]*1e3, BAND['cv_xi_b'][1]*1e3),
-           band_dv_label='DV deployed (0.5–2.1%)',
-           band_cv_label='CV sweep range (0.5–2.0 $\\times10^{-3}$ SNU)',
+           band_dv=band_scaled('dv_qber'),
+           band_cv=band_scaled('cv_xi_b'),
+           band_dv_label=band_label('dv_qber'),
+           band_cv_label=band_label('cv_xi_b'),
            legend_loc='lower left', output_dir=args.output_dir)

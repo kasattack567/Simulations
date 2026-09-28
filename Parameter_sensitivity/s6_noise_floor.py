@@ -13,7 +13,7 @@ is passed: otherwise the first curve would be scaled at the DV clock in the
 deployed-clock panel.
 """
 import numpy as np
-from sens_common import (cv_rate, cv_xi_input, T_of_L, shared_plot, arg_common,
+from sens_common import (band_label, cv_rate, cv_xi_input, T_of_L, shared_plot, arg_common,
                          RANGES, BAND, BAND_SH, CV_XI_B, CV_COLOR)
 
 args = arg_common()
@@ -36,7 +36,7 @@ shared_plot(xa, cv_het, cv_hom,
             f'CV key rate vs excess-noise floor   ($L = {L:.0f}$ km, '
             f'$\\epsilon_b = {CV_XI_B:.0e}$ SNU)',
             's6_noise_floor.png',
-            band=BAND['cv_xi_al'], band_label='Sweep range (0.003–0.008 SNU)',
+            band=BAND['cv_xi_al'], band_label=band_label('cv_xi_al'),
             labels=('CV — GG02 heterodyne', 'CV — GG02 homodyne'),
             colors=(CV_COLOR, '#7d2d8c'), markers=('-s', '--D'),
             kinds=('cv', 'cv'),   # BOTH curves are CV -> both scale at the CV clock

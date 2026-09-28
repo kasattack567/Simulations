@@ -2,40 +2,20 @@
 Shared engine wrappers, locked baseline, and plot helpers for the DV vs CV
 parameter sensitivity analysis (fixed distance, near the crossover).
 
-Imported by the per-parameter scripts s1..s5; not run directly. Keeping the
-baseline and engine calls in ONE place guarantees they stay identical to
-cv_hetro.py / param.md (no per-script drift).
+Imported by s1..s5; not run directly. Centralising the baseline and engine
+calls keeps them identical to cv_hetro.py / param.md.
 
-METHOD NOTE: qosst-skr and TNO are DETERMINISTIC analytic formulas — one input,
-one output. There is no run-to-run variance, so these plots carry NO error bars
-(unlike a Monte-Carlo simulator such as NetSquid, where the spread is real).
+qosst-skr and TNO are deterministic analytic formulas, so no error bars.
 
-DV RECONCILIATION: TNO's asymptotic BB84 hardcodes error correction at the
-Shannon limit (beta=1). DV_BETA<1 is applied post-hoc by scaling the EC cost,
-exactly as in cv_hetro.py.
-
-CV EXCESS NOISE — Wang et al., Opt. Express 27, 13372 (2019), Sec. 5, Eq. 12:
+CV excess noise follows Wang et al. 2019 Eq. 12 (channel-input referred):
     xi_r(T) = (eps_a + eps_l) + eps_b / (eta * T)
-referred to the channel input. eps_b (Bob-side measurement noise) arises AFTER
-the channel and so does not attenuate; referred to the input it is amplified by
-1/(eta*T). This replaces the earlier single-parameter xi_bob/(T*eta) form, which
-had no constant channel floor and an eps_b ~30x too large (it implied 2.5 SNU
-input-referred at 100 km, against ~0.098 SNU measured in Wang Table 2).
+DV f_EC > 1 is applied post-hoc, as in cv_hetro.py (TNO is at Shannon f_EC=1).
 
-CONSEQUENCE FOR THESE SWEEPS: eta and alpha now enter TWICE for CV — once through
-detection, once through xi_r. That coupling is physical and intended, but it means
-the CV curves in s1 and s3 are steeper than under the old constant-xi model.
-
-UNITS — bit/s, TWO PANELS PER FIGURE. The engines return bits per channel use;
-every figure now multiplies by a repetition rate and is plotted in bit/s as a
-side-by-side pair sharing one y-axis:
-    (a) matched clock   — DV 1 GHz, CV 1 GHz  (protocol physics, like-for-like)
-    (b) deployed clock  — DV 1 GHz, CV 100 MHz (what the hardware delivers)
-The DV curve is identical in both panels; CV drops by exactly one decade in (b).
-Only the plot helpers changed — cv_rate/dv_rate still return bits/channel use, so
-nothing downstream of them (crossover distances, network suite, cost model) is
-affected unless it calls these plotters. See CLOCK RATES below.
+Figures plot bit/s as two panels sharing a y-axis: (a) matched clock at 1 GHz
+for both, (b) deployed clocks DV 1 GHz / CV 100 MHz. cv_rate/dv_rate still
+return bits per channel use; only the plot helpers apply the clock scaling.
 """
+
 import os
 import textwrap
 import numpy as np
@@ -50,61 +30,24 @@ from tno.quantum.communication.qkd_key_rate.quantum import standard_detector
 from tno.quantum.communication.qkd_key_rate.quantum.bb84 import (
     BB84FullyAsymptoticKeyRateEstimate, compute_gain_and_error_rate)
 
-
-# ============================================================
-# LOCKED BASELINE (must match cv_hetro.py / param.md section 0)
-# ============================================================
-# Sensitivity test distance. Chosen to sit near the DV/CV crossover so that both
-# protocols are competitive and the sweeps are informative. Set to the exact
-# DV/CV crossover at the baseline beta = 0.95, located by bisection (49.891 km).
-# NB the crossover is beta-dependent: 27.2 km at beta = 0.90, 56.8 km at 0.96,
-# so this is the crossover at baseline, not a universal one. The report rounds
-# it to 50 km. Override per-run with --distance.
-L_KM = 49.891
+L_KM = 59.015
 ALPHA_DB_KM = 0.20
 
-DV_EFFICIENCY = 0.65
-DV_DARK_COUNT = 1e-7       # per gate (100 cps @ ~1 ns / 1 GHz)
-DV_QBER       = 0.005
-DV_BETA       = 0.95       # matched to CV; applied post-hoc (engine is ideal)
+DV_DETECTOR_ETA = 0.92    
+DV_RX_LOSS_DB   = 2.0      
+DV_EFFICIENCY = DV_DETECTOR_ETA * 10**(-DV_RX_LOSS_DB/10.0)   
+DV_DARK_COUNT = 3e-8      
+DV_QBER       = 0.005      
+DV_F_EC       = 1.036      
 
 CV_ETA    = 0.60
 CV_VEL    = 0.10
-CV_BETA   = 0.95
-
-# CV excess noise, Wang Eq. 12 (channel-input referred). Calibrated by Wang
-# against their measured prototype (Table 2 / Fig. 8).
-CV_XI_AL  = 0.005     # eps_a + eps_l: Alice + fibre channel (SNU)
-CV_XI_B   = 0.0005    # eps_b: Bob-side measurement noise (SNU)
-
-# Va capped at 10 SNU per param.md (deployed modulator headroom). Does not affect
-# any result beyond ~20 km; below that the uncapped optimum was unphysical.
+CV_BETA   = 0.95           
+CV_XI_AL  = 0.005     
+CV_XI_B   = 0.0005    
 VA_LO, VA_HI = 1e-2, 10.0
+DARK_CPS_TO_PERGATE = 1e-9  
 
-DARK_CPS_TO_PERGATE = 1e-9  # 100 cps @ 1 GHz, ~1 ns window -> 1e-7 per gate
-
-
-# ============================================================
-# CLOCK RATES — bits/channel-use -> bits/second
-# ============================================================
-# Both engines return an ASYMPTOTIC rate per channel use (DV: per pulse;
-# CV: per transmitted coherent state / symbol). Converting to bit/s requires a
-# repetition rate, and DV and CV do not run at the same one in deployed hardware:
-# modern SNSPD-based DV systems clock at ~1 GHz, while CV-QKD symbol rates are
-# ~100 MHz (limited by the DAC/ADC, the DSP chain and the shot-noise-limited
-# bandwidth of the balanced receiver, not by the protocol).
-#
-# Reporting only one of these is a choice with a thumb on the scale, so every
-# sensitivity figure is drawn as TWO PANELS:
-#   left  — matched clock (1 GHz both): isolates the PROTOCOL physics. Any
-#           DV/CV separation here is intrinsic to the protocols, not to the
-#           electronics, so this is the like-for-like comparison.
-#   right — deployed clock (DV 1 GHz, CV 100 MHz): what the two technologies
-#           actually deliver today. CV shifts down by exactly one decade; the DV
-#           curve is identical to the left panel by construction.
-#
-# The two panels SHARE a y-axis so the decade of separation is read directly off
-# the figure rather than hidden by independent autoscaling.
 DV_CLOCK_HZ  = 1e9    # SNSPD-based DV, ~1 GHz gating/free-running
 CV_CLOCK_HZ  = 1e8    # deployed CV symbol rate, ~100 MHz
 CV_CLOCK_MATCHED_HZ = DV_CLOCK_HZ   # hypothetical parity, left panel
@@ -194,8 +137,12 @@ def _h(p):
     return -p*np.log2(p) - (1-p)*np.log2(1-p)
 
 
-def dv_rate(L_km=L_KM, eta=None, dark_pergate=None, qber=None, beta=None, alpha=None):
-    """DV decoy BB84 bits/pulse, asymptotic, with post-hoc reconciliation beta.
+def dv_rate(L_km=L_KM, eta=None, dark_pergate=None, qber=None, f_ec=None, alpha=None):
+    """DV decoy BB84 bits/pulse, asymptotic, with post-hoc error correction f_EC.
+
+    f_ec is the DV-convention error-correction efficiency (leak = f_EC * Q * h(E)),
+    NOT a CV-convention reconciliation efficiency beta. A caller sweeping a shared
+    beta axis against CV must pass f_ec = 1/beta and label the axis accordingly.
 
     NB: TNO's asymptotic BB84 derives the channel error rate from dark counts and
     POLARIZATION DRIFT, not from the detector's `error_detector` field (which is
@@ -206,7 +153,7 @@ def dv_rate(L_km=L_KM, eta=None, dark_pergate=None, qber=None, beta=None, alpha=
     eta = DV_EFFICIENCY if eta is None else eta
     dark_pergate = DV_DARK_COUNT if dark_pergate is None else dark_pergate
     qber = DV_QBER if qber is None else qber
-    beta = DV_BETA if beta is None else beta
+    f_ec = DV_F_EC if f_ec is None else f_ec
     alpha = ALPHA_DB_KM if alpha is None else alpha
     att = alpha * L_km
     drift = float(np.arcsin(np.sqrt(np.clip(qber, 0.0, 0.5))))  # QBER -> drift angle
@@ -219,19 +166,19 @@ def dv_rate(L_km=L_KM, eta=None, dark_pergate=None, qber=None, beta=None, alpha=
     except Exception:
         return 0.0
     r_ideal = max(r_ideal, 0.0)
-    if beta >= 1.0 or r_ideal <= 0.0:
+    if f_ec <= 1.0 or r_ideal <= 0.0:
         return r_ideal
     try:
         mu = float(np.atleast_1d(mu_opt["mu"])[0])   # optimize_rate returns {"mu": array}
         gain, err = compute_gain_and_error_rate(det, mu, att)
-        ec_extra = (1.0/beta - 1.0) * float(np.atleast_1d(gain)[0]) * _h(float(np.atleast_1d(err)[0]))
+        ec_extra = (f_ec - 1.0) * float(np.atleast_1d(gain)[0]) * _h(float(np.atleast_1d(err)[0]))
         return max(r_ideal - ec_extra, 0.0)
     except Exception:
         return r_ideal
 
 
 # ============================================================
-# PLOT STYLE — dissertation-grade defaults
+# PLOT STYLE
 # ============================================================
 plt.rcParams.update({
     "font.family": "serif",
@@ -566,51 +513,32 @@ def arg_output_dir():
 
 
 # ============================================================
-# SWEEP RANGES + DEPLOYED BANDS
-# Ranges: param.md deployed ranges, two modestly extended so the curve's full
-# response is visible (beta to 0.80; dv_qber to the ~11% BB84 cutoff). Dark
-# count kept realistic (1-1000 cps) — flat there is correct physics, corroborated
-# by an independent NetSquid simulation, so the axis is not stretched.
+# SWEEP RANGES + DEPLOYED BANDS (param.md; June 2026 refs)
+# Ranges cover deployed hardware; beta and DV QBER extended to the curve's
+# full response. Bands are "best-demonstrated deployed/field" per protocol;
+# outliers (different detector tier, amplifier tricks) excluded.
 #
-# DEPLOYED/REALISTIC BANDS — each end sourced to a specific paper (June 2026).
-# Bands reflect "best-demonstrated deployed/field" hardware for each protocol.
-# Outliers excluded where noted (different detector tier / amplifier tricks).
+#  DV eta   0.65-0.93   Tang 2016 Hefei / Swedish 303km field (arXiv:2606.06107)
+#  CV eta   0.60-0.72   Lodewyck 2007 / Si-photonic TBHD (arXiv:2305.03419)
+#  beta     0.90-0.96   Lodewyck-SECOQC / MET-LDPC (arXiv:1703.04916)
+#  alpha    0.18-0.21   ITU-T G.652.D / deployed field fibre
+#  DV dark  1-1000 cps  Swedish 303km / Boston metro (arXiv:1708.00434)
+#  CV v_el  0.015-0.11  Jouguet 2013 / deployed BPD (npj QI 2025)
+#  CV eps_b 5e-4-2e-3   Wang 2019 (also matches LuxQuanta NOVA LQ Gen-2 spec)
+#  DV QBER  0.5-2.1 %   Swedish trial SNSPD / InGaAs (arXiv:2606.06107)
 #
-#  DV eta   0.65-0.93  lo: Tang 2016 Hefei deployed metro SNSPD 0.64-0.66
-#                      hi: Swedish 303km field trial 0.92-0.93 (arXiv:2606.06107)
-#                      (NbN intercity 0.30, arXiv:1708.00434, excluded as low outlier)
-#  CV eta   0.60-0.72  lo: Lodewyck 2007 (0.606); "most CV uses 0.6" (arXiv:1006.4216)
-#                      hi: Si-photonic TBHD 0.72 (arXiv:2305.03419)
-#                      (PSA-enhanced 0.965 and integrated 0.37 excluded: diff. tier)
-#  beta     0.90-0.96  lo: Lodewyck/SECOQC field beta=0.9
-#                      hi: rate-adaptive MET-LDPC 0.964 (arXiv:1703.04916)
-#                      (older homodyne beta=0.8, arXiv:1006.4216, noted as floor)
-#  alpha    0.18-0.21  lo: better-grade deployed SMF ~0.18 (ITU-T G.652.D)
-#                      hi: deployed field fibre 0.19-0.21 (Tang 2016 et al.)
-#  DV dark  1-1000 cps lo: Swedish 303km field SNSPD <=1 cps (arXiv:2606.06107)
-#                      hi: Boston metro WSi/NbN ~1000 cps (arXiv:1708.00434)
-#  CV v_el  0.015-0.11 lo: Jouguet 2013 deployed 80 km system, v_el=0.015
-#                      hi: deployed field BPD 0.11 SNU (npj QI 2025, s41534-025-01060-7)
-#  CV eps_b 5e-4-2e-3 lo: Wang 2019 prototype calibration; also reproduces the
-#                          LuxQuanta NOVA LQ Gen-2 spec (100 km / 20 dB)
-#                      hi: pessimistic deployed (reach ~69 km)
-#                      NB total input-referred xi_r follows Eq. 12 and is
-#                          distance-dependent; measured values run 0.005 SNU at
-#                          0 km to ~0.098 SNU at 100 km (Wang Table 2)
-#  DV QBER  0.5-2.1%   lo: Swedish field SNSPD link 0.5% (arXiv:2606.06107)
-#                      hi: same trial InGaAs detector 2.1% (arXiv:2606.06107)
-#
-# NB asymmetry is real, not an artefact: DV eta band (0.65-0.93) sits above CV eta
-# (0.60-0.72) because deployed SNSPDs genuinely outperform deployed homodyne. This
-# supports the matched-maturity-tier fairness argument (see methodology.md).
+# xi_r follows Wang Eq. 12 and is distance-dependent (~0.005 SNU at 0 km to
+# ~0.098 at 100 km, Wang Table 2). DV eta band sits above CV eta because
 # ============================================================
+
 N = 40
 RANGES = dict(
-    dv_eta  = np.linspace(0.50, 1.00, N),    # axis 0.5-1.0; deployed band sits inside
+    dv_eta  = np.linspace(0.35, 1.00, N),    # Bob TOTAL efficiency (eta_B), not detector SDE
     cv_eta  = np.linspace(0.50, 1.00, N),    # axis 0.5-1.0; deployed band sits inside
-    beta    = np.linspace(0.80, 1.00, N),    # deployed 0.90-0.96 is a slice
+    beta    = np.linspace(0.80, 1.00, N),    # CV reconciliation; deployed 0.90-0.96 is a slice
+    dv_f_ec = np.linspace(1.00, 1.40, N),    # DV error correction; deployed 1.036-1.20 is a slice
     alpha   = np.linspace(0.01, 0.25, N),    # HCF-motivated: 0.01 (HCF projected) to 0.25
-    dv_dark = np.logspace(0, 5, N),          # 1-1e5 cps; deployed 1-1000 is a slice
+    dv_dark = np.logspace(0, 5, N),          # 1-1e5 cps; Clason band 1-70 is a slice
     cv_vel  = np.linspace(0.00, 0.50, N),    # deployed 0.05-0.11 is a slice
     dv_qber = np.linspace(0.001, 0.11, N),   # to ~11% cutoff; deployed 0.5-2.1% is a slice
     # Wang Eq. 12 decomposition. eps_b is the term that carries the distance
@@ -620,13 +548,73 @@ RANGES = dict(
     cv_xi_al = np.linspace(0.0, 0.02, N),    # Alice+fibre floor (SNU)
 )
 BAND = dict(
-    dv_eta=(0.65, 0.93), cv_eta=(0.60, 0.72), beta=(0.90, 0.96),
-    alpha=(0.091, 0.20), dv_dark=(1, 1000), cv_vel=(0.015, 0.11),
-    dv_qber=(0.005, 0.021),
-    # eps_b lo: Wang 2019 calibration to their prototype (5e-4), which also
-    # reproduces the 100 km / 20 dB reach of the LuxQuanta NOVA LQ Gen-2
-    # commercial CV-QKD system. hi: 2e-3, a more pessimistic deployed figure
-    # (reach ~69 km). Reach at the lo/hi ends: 94 km / 69 km.
-    cv_xi_b=(5e-4, 2e-3),
-    cv_xi_al=(0.003, 0.008),
+    # --- DV ---
+    # Bob TOTAL eff = SDE 0.92 (Clason 2026) x receiver optics 1.0-3.5 dB
+    # (Kelsey 2026 / Chen 2009). Baseline 2.0 dB -> 0.580.
+    dv_eta=(0.411, 0.731),
+    # Clason 2026 (<=1 cps X-basis, ~30 key, ~10 ambient) to UK-Ireland 70 cps.
+    dv_dark=(1, 70),
+    # Clason 2026: 0.5% (110 km SNSPD) to 1.8% (143 km MCF).
+    dv_qber=(0.005, 0.018),
+
+    # --- CV ---
+    # Measured receiver eff: Pi 2023, Fossier 2009, Zhang 2019/2020, Hajomer 2024.
+    cv_eta=(0.56, 0.68),
+    # Fossier 2009 to Zhang 2020 in-system.
+    cv_vel=(0.01, 0.27),
+    # Inverted from Wang 2019 Table 2 at 0/20/50/80/100 km (eps_al = 0.005).
+    cv_xi_b=(1e-4, 2e-3),
+    # Wang 0 km point, +/-1 SD.
+    cv_xi_al=(0.002, 0.007),
+
+    # --- reconciliation (two distinct parameters) ---
+    # CV beta, multiplies I_AB. Hajomer 2024 to Wang 2017 MET-LDPC. Zhang's 0.98
+    # (202 km lab) and Milicevic 0.99 (sim) excluded. Engine ignores FER, so
+    # high beta w/o its FER isn't face-value usable — argues for the low end.
+    beta=(0.90, 0.96),
+    # DV f_EC, scales leakage. Related to beta by Mueller 2024 Eq. 6, NOT 1/beta.
+    # Mueller 2024 Cascade 1.036 / LDPC 1.166; Xu et al. RMP 2020 1.1-1.2.
+    # Band shifts crossover ~1 km, reach 303.4 -> 298.2 km — nearly inert vs beta.
+    dv_f_ec=(1.036, 1.20),
+
+    # --- shared ---
+    # Not a deployed spread (silica ~0.2 dB/km, flat for 40 yrs). Motivated by
+    # hollow-core: 0.091 dB/km demonstrated (Petrovich et al., Nat. Photon. 19,
+    # 1203, 2025), ~0.01 projected. Forward-looking; CV is loss-limited.
+    alpha=(0.091, 0.20),
 )
+
+
+# ============================================================
+# BAND LEGEND LABELS — generated from BAND, never hardcoded
+# ============================================================
+# Every band label used to be a hand-typed string duplicating the numbers in
+# BAND. They drifted apart the first time a band moved. band_label() formats the
+# label straight from BAND so the legend and the shaded region cannot disagree.
+_BAND_FMT = {
+    "dv_eta":   ("DV Bob total efficiency",            "{:.2f}",  ""),
+    "cv_eta":   ("CV receiver efficiency",             "{:.2f}",  ""),
+    "beta":     (r"CV deployed $\beta$",               "{:.2f}",  ""),
+    "dv_f_ec":  (r"DV deployed $f_{EC}$",              "{:.3f}",  ""),
+    "alpha":    ("HCF demonstrated to silica",         "{:.3g}",  " dB/km"),
+    "dv_dark":  ("DV deployed",                        "{:.0f}",  " cps"),
+    "cv_vel":   ("CV deployed",                        "{:.3g}",  " SNU"),
+    "dv_qber":  ("DV deployed",                        "{:.1f}",  "%"),
+    "cv_xi_b":  (r"Wang Table 2 implied $\epsilon_b$", "{:.1f}",  r" $\times10^{-3}$ SNU"),
+    "cv_xi_al": (r"Wang 0 km $\pm1\sigma$",            "{:.3g}",  " SNU"),
+}
+_BAND_SCALE = {"dv_qber": 100.0, "cv_xi_b": 1e3}
+
+
+def band_label(key, prefix=None):
+    """Legend label for BAND[key], with the numbers taken from BAND itself."""
+    lo, hi = BAND[key]
+    name, fmt, unit = _BAND_FMT[key]
+    k = _BAND_SCALE.get(key, 1.0)
+    return f"{prefix or name} ({fmt.format(lo*k)}-{fmt.format(hi*k)}{unit})"
+
+
+def band_scaled(key):
+    """BAND[key] in the units the corresponding figure plots in."""
+    k = _BAND_SCALE.get(key, 1.0)
+    return (BAND[key][0]*k, BAND[key][1]*k)

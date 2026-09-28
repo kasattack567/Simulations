@@ -11,7 +11,7 @@ no double-counting between v_el and xi_r.
 Crossings across the two axes are NOT physically meaningful. No error bars.
 """
 import numpy as np
-from sens_common import (dv_rate, cv_rate, twin_plot3, arg_common,
+from sens_common import (band_label, dv_rate, cv_rate, twin_plot3, arg_common,
                          RANGES, BAND, DARK_CPS_TO_PERGATE)
 
 args = arg_common()
@@ -30,6 +30,6 @@ twin_plot3(RANGES['dv_dark'], dv, RANGES['cv_vel'], cv_het, cv_hom,
            f'Key rate vs detector noise   ($L = {L:.0f}$ km)',
            's4_detector_noise.png',
            band_dv=BAND['dv_dark'], band_cv=BAND['cv_vel'],
-           band_dv_label='DV deployed (1–1000 cps)',
-           band_cv_label='CV deployed (0.015–0.11 SNU)',
+           band_dv_label=band_label('dv_dark'),
+           band_cv_label=band_label('cv_vel'),
            logx_dv=True, legend_loc='lower left', output_dir=args.output_dir)

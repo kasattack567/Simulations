@@ -11,7 +11,7 @@ efficiency and once through the input-referred excess noise xi_r = eps_a + eps_l
 alone would produce. This is physical, not an artefact.
 """
 import numpy as np
-from sens_common import (dv_rate, cv_rate, cv_xi_input, T_of_L, shared_plot3,
+from sens_common import (band_label, dv_rate, cv_rate, cv_xi_input, T_of_L, shared_plot3,
                          arg_common, BAND, BAND_DV, BAND_CV)
 
 args = arg_common()
@@ -29,6 +29,6 @@ shared_plot3(eta, dv, cv_het, cv_hom,
              'Detector efficiency  $\\eta$',
              f'Key rate vs detector efficiency   ($L = {L:.0f}$ km)',
              's1_detector_eff.png',
-             bands=[(BAND['dv_eta'], BAND_DV, 'DV deployed SNSPD (0.65–0.93)'),
-                    (BAND['cv_eta'], BAND_CV, 'CV deployed homodyne (0.60–0.72)')],
+             bands=[(BAND['dv_eta'], BAND_DV, band_label('dv_eta')),
+                    (BAND['cv_eta'], BAND_CV, band_label('cv_eta'))],
              output_dir=args.output_dir)

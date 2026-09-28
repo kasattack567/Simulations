@@ -179,11 +179,13 @@ def main():
     p.add_argument("--n", type=int, default=20)
     p.add_argument("--runs", type=int, default=10)
     p.add_argument("--areas", type=float, nargs="+",
-                   default=[10, 20, 30, 40, 50, 60, 70, 80, 90, 100])
+                   default=[10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 150, 200, 250])
     p.add_argument("--kmax", type=int, default=25)
     p.add_argument("--cv", choices=["heterodyne", "homodyne"], default="heterodyne")
     p.add_argument("--reach", type=float, default=span_km("cv_het"),
                    help="CV hop span, km (default: net_common sizing criterion)")
+    p.add_argument("--reach-dv", type=float, default=span_km("dv"),
+                   help="DV hop span, km (default: net_common sizing criterion)")
     p.add_argument("--save", type=str, default=None)
     args = p.parse_args()
 
@@ -191,32 +193,41 @@ def main():
     areas = np.array(args.areas, dtype=float)
     dv_tot = np.zeros(len(areas)); dv_std = np.zeros(len(areas))
     cv_tot = np.zeros(len(areas)); cv_std = np.zeros(len(areas))
-    k_mean = np.zeros(len(areas)); k_std = np.zeros(len(areas))
+    kcv_mean = np.zeros(len(areas)); kcv_std = np.zeros(len(areas))
+    kdv_mean = np.zeros(len(areas)); kdv_std = np.zeros(len(areas))
 
-    print(f"N={args.n}, {args.runs} layouts/area, CV={args.cv}, reach {args.reach:.0f} km\n")
+    print(f"N={args.n}, {args.runs} layouts/area, CV={args.cv}, "
+          f"reach CV {args.reach:.0f} km / DV {args.reach_dv:.0f} km\n")
     for a_idx, area in enumerate(areas):
-        dvs, cvs, ks = [], [], []
+        dvs, cvs, kcv, kdv = [], [], [], []
         for r in range(args.runs):
-            users = place_users(args.n, area_km=area, seed=9000 * a_idx + r)
-            k, relays = min_relays_positions(users, args.reach, args.kmax,
-                                             seed=9000 * a_idx + r)
-            dvs.append(dv_total_direct(users, args.reach))
-            cvs.append(network_total_relayed(users, relays, cv_proto, args.reach))
-            ks.append(k)
+            seed = 9000 * a_idx + r
+            users = place_users(args.n, area_km=area, seed=seed)
+            # CV: minimum relays at CV's reach, then relayed end-to-end rate
+            k_c, relays_c = min_relays_positions(users, args.reach, args.kmax, seed)
+            cvs.append(network_total_relayed(users, relays_c, cv_proto, args.reach))
+            kcv.append(k_c)
+            # DV: the SAME procedure at DV's reach.  Previously the DV relay
+            # count was hardcoded to zero, which is true only while the square
+            # diagonal stays inside DV's reach (a*sqrt(2) <= 252 km, i.e. up to
+            # about a 178 km side).  Beyond that DV needs relays too.
+            k_d, relays_d = min_relays_positions(users, args.reach_dv, args.kmax, seed)
+            dvs.append(network_total_relayed(users, relays_d, "dv", args.reach_dv))
+            kdv.append(k_d)
         dv_tot[a_idx], dv_std[a_idx] = np.mean(dvs), np.std(dvs)
         cv_tot[a_idx], cv_std[a_idx] = np.mean(cvs), np.std(cvs)
-        k_mean[a_idx], k_std[a_idx] = np.mean(ks), np.std(ks)
-        print(f"area {area:4.0f} km:  DV total {np.mean(dvs):.3e}   "
-              f"CV total {np.mean(cvs):.3e}   relays {np.mean(ks):.1f}   "
-              f"CV/DV {np.mean(cvs)/np.mean(dvs):.2f}")
+        kcv_mean[a_idx], kcv_std[a_idx] = np.mean(kcv), np.std(kcv)
+        kdv_mean[a_idx], kdv_std[a_idx] = np.mean(kdv), np.std(kdv)
+        print(f"area {area:4.0f} km:  DV total {np.mean(dvs):.3e} "
+              f"({np.mean(kdv):4.1f} relays)   CV total {np.mean(cvs):.3e} "
+              f"({np.mean(kcv):4.1f} relays)   CV/DV {np.mean(cvs)/np.mean(dvs):.2f}")
 
     # ============================================================
     plt.rcParams.update({"font.family": "serif", "font.size": 12})
     fig, (axR, axK) = plt.subplots(1, 2, figsize=(15, 6))
 
-    # Rates are already bits/s (converted in the total_* functions above).
     axR.plot(areas, dv_tot, "-o", color="#1f4e9c",
-             label="DV — decoy BB84", markersize=5)
+             label="DV — decoy BB84 (relayed)", markersize=5)
     axR.fill_between(areas, np.maximum(dv_tot - dv_std, 1e-12),
                      dv_tot + dv_std, color="#1f4e9c", alpha=0.15)
     axR.plot(areas, cv_tot, "-s", color="#c0392b",
@@ -232,16 +243,18 @@ def main():
     axR.grid(True, which="both", alpha=0.3)
     axR.legend(fontsize=10)
 
-    axK.plot(areas, np.zeros_like(areas), "-o", color="#1f4e9c",
-             label="DV (needs none)", markersize=5)
-    axK.plot(areas, k_mean, "-s", color="#c0392b", label="CV trusted relays",
+    axK.plot(areas, kdv_mean, "-o", color="#1f4e9c",
+             label="DV trusted relays", markersize=5)
+    axK.fill_between(areas, np.maximum(kdv_mean - kdv_std, 0), kdv_mean + kdv_std,
+                     color="#1f4e9c", alpha=0.15)
+    axK.plot(areas, kcv_mean, "-s", color="#c0392b", label="CV trusted relays",
              markersize=5)
-    axK.fill_between(areas, np.maximum(k_mean - k_std, 0), k_mean + k_std,
+    axK.fill_between(areas, np.maximum(kcv_mean - kcv_std, 0), kcv_mean + kcv_std,
                      color="#c0392b", alpha=0.15)
     axK.axvspan(10, 40, color="#7cc47f", alpha=0.12, zorder=0)
     axK.set_xlabel("Area side length (km)")
     axK.set_ylabel("Minimum trusted relays for full coverage")
-    axK.set_title("Cost: trusted nodes CV requires")
+    axK.set_title("Cost: trusted nodes each protocol requires")
     axK.grid(True, alpha=0.3)
     axK.legend(fontsize=10)
     axK.set_ylim(bottom=-0.5)

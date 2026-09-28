@@ -41,6 +41,26 @@ plt.rcParams.update({
 LEVELS = [1, 1.5, 2, 3, 4, 6, 8, 10, 14, 20]
 
 
+def _fmt_bps(c):
+    """Readable service target: 1 kbit/s prints as '1 kbps', not '0 Mbps'."""
+    if c >= 1e9:
+        return f"{c/1e9:g} Gbps"
+    if c >= 1e6:
+        return f"{c/1e6:g} Mbps"
+    if c >= 1e3:
+        return f"{c/1e3:g} kbps"
+    return f"{c:g} bps"
+
+
+def _round_targets(c_vals, k=3):
+    """Up to k round decade values inside the swept range, for printed tables."""
+    lo, hi = int(np.ceil(np.log10(c_vals.min()))), int(np.floor(np.log10(c_vals.max())))
+    dec = list(range(lo, hi + 1)) or [int(round(np.log10(c_vals.mean())))]
+    if len(dec) > k:
+        dec = [dec[i] for i in np.linspace(0, len(dec) - 1, k).round().astype(int)]
+    return [10.0 ** d for d in dec]
+
+
 def grid(model, c_vals, s_vals):
     Z = np.empty((len(s_vals), len(c_vals)))
     for i, s in enumerate(s_vals):
@@ -57,7 +77,7 @@ def report_spread(regimes, c_vals, s_vals):
     100 * (max - min) / (2 * median). This is what backs the claim that the
     six topologies agree to within about +/-10% except at the extreme corner.
     """
-    cs_show = [1e6, 1e7, 1e8]
+    cs_show = _round_targets(c_vals)
     ss_show = [0.0, 5.0, 20.0]
     print("\n" + "=" * 78)
     print("PER-TOPOLOGY SPREAD of R*  (min / median / max over the six networks)")
@@ -75,7 +95,7 @@ def report_spread(regimes, c_vals, s_vals):
                 spread_pct = 100.0 * (hi - lo) / (2.0 * med) if med else 0.0
                 detail = "  ".join(
                     f"{n.split('_')[-1][:4]}:{v:.1f}" for n, v in vals.items())
-                print(f"{c/1e6:>6.0f}M {s:>7.1f} | "
+                print(f"{_fmt_bps(c):>7} {s:>7.1f} | "
                       f"{lo:>6.2f} {med:>6.2f} {hi:>6.2f} {spread_pct:>6.1f}% "
                       f"| {detail}")
 
@@ -94,19 +114,19 @@ def report_spread(regimes, c_vals, s_vals):
     k, c, s = where
     print(f"\nWorst-case spread over the full grid: {worst:.1f}% "
           f"(half-range / median) at {k} clocks, "
-          f"c_min={c/1e6:.0f} Mbps, c_site={s:.1f}.")
+          f"c_min={_fmt_bps(c)}, c_site={s:.1f}.")
     print("Elsewhere the six topologies agree far more tightly, so the median "
           "is a faithful summary.")
 
 
-def plot_slices(regimes, outdir):
+def plot_slices(regimes, outdir, cmin_exp=4.0, cmax_exp=7.0):
     """Six per-topology R* curves at two site-cost cuts, matched clocks.
 
     Supporting figure for the median heatmap: shows the six topologies track
     closely (so the median is faithful), and where the spread opens up.
     """
     model = dict((k, m) for _t, m, k in regimes)["matched"]
-    c_vals = np.logspace(6, 8, 40)
+    c_vals = np.logspace(cmin_exp, cmax_exp, 40)
     cuts = [(0.0, r"(a) No site cost ($c_{site}=0$)"),
             (20.0, r"(b) High site cost ($c_{site}=20$)")]
     colors = plt.cm.tab10(np.linspace(0, 1, len(TOPOLOGY_FILES)))
@@ -139,6 +159,12 @@ def plot_slices(regimes, outdir):
 
 def main():
     p = argparse.ArgumentParser()
+    p.add_argument("--cmin-exp", type=float, default=3.0,
+                   help="log10 of the lowest service target, bit/s "
+                        "(3 = 1 kbit/s, the default)")
+    p.add_argument("--cmax-exp", type=float, default=7.0,
+                   help="log10 of the highest service target, bit/s "
+                        "(7 = 10 Mbit/s, the default)")
     p.add_argument("--nc", type=int, default=13, help="c_min grid points")
     p.add_argument("--ns", type=int, default=21, help="c_site grid points")
     p.add_argument("--smax", type=float, default=20.0)
@@ -158,7 +184,7 @@ def main():
                ("(b) Matched clocks: both 1 GHz",
                 CostModel(mat_t, cvk), "matched")]
 
-    c_vals = np.logspace(4, 8, args.nc)
+    c_vals = np.logspace(args.cmin_exp, args.cmax_exp, args.nc)
     s_vals = np.linspace(0, args.smax, args.ns)
     C, S = np.meshgrid(c_vals, s_vals)
 
@@ -208,11 +234,11 @@ def main():
 
     # readable extract at round values
     print("\nBreak-even R* (median over the six topologies)\n")
-    cs_show = [1e6, 1e7, 1e8]
+    cs_show = _round_targets(c_vals)
     ss_show = [0, 5, 10, 20]
     for _, _, key in regimes:
         print(f"{key} clocks")
-        print(f"{'c_site':>8} | " + " | ".join(f"{c/1e6:>6.0f} Mbps"
+        print(f"{'c_site':>8} | " + " | ".join(f"{_fmt_bps(c):>11}"
                                                for c in cs_show))
         print("-" * 42)
         for s in ss_show:
@@ -232,7 +258,8 @@ def main():
         report_spread(regimes, c_vals, s_vals)
 
     if args.slices:
-        plot_slices(regimes, args.outdir)
+        plot_slices(regimes, args.outdir,
+                    max(args.cmin_exp, args.cmax_exp - 3.0), args.cmax_exp)
 
 
 if __name__ == "__main__":

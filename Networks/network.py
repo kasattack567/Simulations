@@ -1,12 +1,25 @@
 """
-Network map — DV vs CV side by side on the same  user layout.
+Network map — DV vs CV side by side on the same user layout.
 
 Places N users uniformly at random in a square area, forms all direct
 user pairs (BB84-style, no relays), and draws TWO maps sharing the identical
 layout: one for DV, one for CV. On each map, a link is drawn only if that
 protocol yields a key over that pair's distance, and coloured by rate. The CV
-map visibly loses its longer links (CV reach ~40 km) while DV keeps them
-(DV reach ~279 km vs CV ~94 km) — the core network finding, shown as a map.
+map visibly loses its longer links while DV keeps them (zero-rate reach: DV
+~303 km vs CV ~94 km) — the core network finding, shown as a map.
+
+REACHABILITY FLOOR. A pair is drawn only if its rate clears
+net_common.REACHABLE_BPS, currently 256 bit/s = one AES-256 key per second
+(Nweke et al., arXiv:2306.15031, define the required rate as key length times
+refresh rate). The floor is not neutral between the protocols: CV's curve falls
+vertically at its limit because eps_b/(eta*T) diverges, so CV's map barely
+changes with it, while DV's tail decays gently and DV loses links faster as the
+floor rises. The floor is printed, put in the figure subtitle and written into
+the output filename, so two runs at different floors cannot be confused or
+silently overwrite each other. Override per run:
+
+    QKD_REACHABLE_BPS=20   python network.py     # Jouguet CV field test
+    QKD_REACHABLE_BPS=1e4  python network.py     # carrier-grade
 
 Vary the scenario from the command line:
     python network.py --n 20 --area 30 --seed 7
@@ -14,21 +27,21 @@ Vary the scenario from the command line:
     python network.py --n 15 --area 60 --save out.png
 
 Engines (dv_rate / cv_rate) are imported from the sensitivity module so the
-network stage uses the SAME corrected parameters and conventions as the
-point-to-point and sensitivity stages. Set QKD_ENGINE_DIR if needed.
+network stage uses the SAME parameters and conventions as the point-to-point and
+sensitivity stages. Set QKD_ENGINE_DIR if needed.
 """
 import argparse
 import os
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
 import networkx as nx
 
 from net_common import (place_users, all_pairs, pair_distance_km,
                         link_rate, to_bps, is_reachable, REACHABLE_BPS,
-                        CV_REACH_KM, DV_REACH_KM, CROSSOVER_KM, relayed_network)
+                        CV_REACH_KM, relayed_network, relay_positions,
+                        CLOCK_LABEL)
 
 # UNITS: every rate on this figure — edge colours, colourbar, metrics table and
 # the printed summary — is in BITS/S, converted with to_bps at the protocol's
@@ -38,9 +51,24 @@ from net_common import (place_users, all_pairs, pair_distance_km,
 USER_C = "#333333"
 RELAY_C = "#ff7f0e"   # trusted-node relays
 
+# matplotlib 3.7 deprecated cm.get_cmap and 3.11 removes it. Resolve once here.
+CMAP = plt.get_cmap("viridis")
+
+
+def fmt_floor(bps):
+    """Format a rate for a label without forcing it into kbit/s.
+
+    A plain divide-by-1e3 renders the 256 bit/s default as '0.256 kbit/s'.
+    """
+    if bps >= 1e6:
+        return f"{bps/1e6:g} Mbit/s"
+    if bps >= 1e3:
+        return f"{bps/1e3:g} kbit/s"
+    return f"{bps:g} bit/s"
+
 
 def build_graph(users, protocol):
-    """Graph with all users; edges only where `protocol` gives a positive key.
+    """Graph with all users; edges only where `protocol` clears the floor.
     Edge weight = key rate. Returns (G, pos, rates dict, distances dict)."""
     G = nx.Graph()
     for i in range(len(users)):
@@ -63,16 +91,14 @@ def draw_map(ax, users, protocol, title, vmin, vmax):
     n_pairs = n * (n - 1) // 2
 
     # colour edges by rate (log scale), thicker = higher rate
-    cmap = cm.get_cmap("viridis")
     norm = mcolors.LogNorm(vmin=vmin, vmax=vmax)
     if G.number_of_edges() > 0:
         edges = list(G.edges())
-        ecolors = [cmap(norm(G[u][v]["rate"])) for u, v in edges]
+        ecolors = [CMAP(norm(G[u][v]["rate"])) for u, v in edges]
         widths = [0.4 + 2.2 * norm(G[u][v]["rate"]) for u, v in edges]
         nx.draw_networkx_edges(G, pos, edgelist=edges, edge_color=ecolors,
                                width=widths, alpha=0.7, ax=ax)
-    nx.draw_networkx_nodes(G, pos, node_color=USER_C, node_size=55,
-                           ax=ax)
+    nx.draw_networkx_nodes(G, pos, node_color=USER_C, node_size=55, ax=ax)
 
     # networkx disables ticks; re-enable so the km axes are visible
     ax.tick_params(left=True, bottom=True, labelleft=True, labelbottom=True)
@@ -112,16 +138,16 @@ def draw_map_relayed(ax, users, protocol, title, vmin, vmax, reach_km):
     n = len(users)
     n_pairs = n * (n - 1) // 2
 
-    cmap = cm.get_cmap("viridis")
     norm = mcolors.LogNorm(vmin=vmin, vmax=vmax)
 
     # draw each rescued/direct link along its relay chain
     for (i, j), r in rates.items():
-        from net_common import relay_positions
-        pts = [tuple(users[i])] + relay_positions(users, i, j, reach_km) + [tuple(users[j])]
-        c = cmap(norm(r))
+        pts = ([tuple(users[i])] + relay_positions(users, i, j, reach_km)
+               + [tuple(users[j])])
+        c = CMAP(norm(r))
         w = 0.4 + 2.2 * norm(r)
-        xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
         ax.plot(xs, ys, color=c, lw=w, alpha=0.7, zorder=2)
 
     ax.scatter(users[:, 0], users[:, 1], c=USER_C, s=55, zorder=3)
@@ -133,12 +159,14 @@ def draw_map_relayed(ax, users, protocol, title, vmin, vmax, reach_km):
         ax.legend(loc="upper left", fontsize=9, framealpha=0.9)
 
     ax.tick_params(left=True, bottom=True, labelleft=True, labelbottom=True)
-    cov = len(rates) / n_pairs
+    cov = len(rates) / n_pairs if n_pairs else 0.0
     ax.set_title(f"{title}  (+relays)\n{len(rates)}/{n_pairs} links "
                  f"({cov*100:.0f}% reachable), {net['total_relays']} relays",
                  fontsize=11)
-    ax.set_xlabel("x (km)"); ax.set_ylabel("y (km)")
-    ax.set_aspect("equal"); ax.grid(True, alpha=0.2, lw=0.5)
+    ax.set_xlabel("x (km)")
+    ax.set_ylabel("y (km)")
+    ax.set_aspect("equal")
+    ax.grid(True, alpha=0.2, lw=0.5)
     rvals = np.array(list(rates.values())) if rates else np.array([])
     return dict(
         success_rate=cov, n_connected=len(rates),
@@ -167,6 +195,9 @@ def main():
         args.seed = int.from_bytes(os.urandom(4), "big") % 100000
         print(f"Seed: {args.seed}")
 
+    print(f"reachability floor: {fmt_floor(REACHABLE_BPS)} "
+          f"({REACHABLE_BPS/256:.2f} AES-256 keys/s)   clocks: {CLOCK_LABEL}")
+
     users = place_users(args.n, area_km=args.area, seed=args.seed)
     cv_proto = "cv_hom" if args.cv == "homodyne" else "cv_het"
 
@@ -180,7 +211,10 @@ def main():
     if all_rates:
         vmin, vmax = min(all_rates), max(all_rates)
     else:
-        vmin, vmax = 1e3, 1e9
+        # Fully disconnected layout. Anchor the low end on the floor rather than a
+        # hardcoded 1e3, so a link sitting just above a sub-kbit/s floor cannot
+        # fall off the bottom of the colour scale.
+        vmin, vmax = REACHABLE_BPS, 1e9
 
     plt.rcParams.update({"font.family": "serif", "font.size": 12})
     fig = plt.figure(figsize=(18, 11))
@@ -191,8 +225,8 @@ def main():
                           left=0.06, right=0.94, top=0.90, bottom=0.06)
     axDV = fig.add_subplot(gs[0, 0])
     axCV = fig.add_subplot(gs[0, 1], sharex=axDV, sharey=axDV)
-    cax  = fig.add_subplot(gs[0, 2])          # dedicated colourbar axis
-    axT  = fig.add_subplot(gs[1, :])          # metrics table panel
+    cax = fig.add_subplot(gs[0, 2])           # dedicated colourbar axis
+    axT = fig.add_subplot(gs[1, :])           # metrics table panel
     axT.axis("off")
 
     statsDV = draw_map(axDV, users, "dv", "DV — decoy BB84", vmin, vmax)
@@ -204,10 +238,14 @@ def main():
 
     # shared colourbar in its own axis (no overlap with the plots)
     sm = cm.ScalarMappable(norm=mcolors.LogNorm(vmin=vmin, vmax=vmax),
-                           cmap="viridis")
+                           cmap=CMAP)
     sm.set_array([])
     cbar = fig.colorbar(sm, cax=cax)
     cbar.set_label("Link key rate (bits / s)")
+    # Mark the floor on the colourbar: everything below it was dropped, not drawn
+    # faintly, so the reader can see where the cut sits relative to the scale.
+    if vmin <= REACHABLE_BPS <= vmax:
+        cbar.ax.axhline(REACHABLE_BPS, color="k", lw=1.2, ls=":")
 
     # network geometry (same for both)
     dists = np.array([pair_distance_km(users, i, j)
@@ -254,23 +292,27 @@ def main():
            f"Better here: {winner} (by {basis})")
     axT.set_title(geo, fontsize=11, pad=8)
 
-    fig.suptitle(f"Metro network: DV vs CV   (seed={args.seed})",
+    fig.suptitle(f"Metro network: DV vs CV   (seed={args.seed}, "
+                 f"{fmt_floor(REACHABLE_BPS)} floor)",
                  fontsize=15, weight="bold")
 
     print(f"\n{'metric':<16}{'DV':>14}{'CV':>14}")
     for label, key, e in [("reachability", "success_rate", False),
                           ("avg rate bit/s", "avg_key_rate", True),
                           ("total bit/s", "total_key_rate", True)]:
-        dv = statsDV[key]*(100 if key == "success_rate" else 1)
-        cv = statsCV[key]*(100 if key == "success_rate" else 1)
+        dv = statsDV[key] * (100 if key == "success_rate" else 1)
+        cv = statsCV[key] * (100 if key == "success_rate" else 1)
         fs = "{:>14.2e}" if e else "{:>13.0f}%"
         print(f"{label:<16}" + fs.format(dv) + fs.format(cv))
     print(f"Better here: {winner} (by {basis})")
 
     outdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "figures")
     os.makedirs(outdir, exist_ok=True)
+    # Floor in the filename: a 256 bit/s run and a 1 kbit/s run are different
+    # figures on the same layout and must not overwrite each other.
     fname = args.save or (
         f"network_N{args.n}_area{args.area:.0f}_seed{args.seed}"
+        f"_floor{REACHABLE_BPS:.0f}bps"
         f"{'_relays' if args.relays else ''}.png")
     path = os.path.join(outdir, fname)
     fig.savefig(path, dpi=200)

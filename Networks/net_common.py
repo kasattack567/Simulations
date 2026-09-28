@@ -46,21 +46,22 @@ except ImportError as e:
 
 # ============================================================
 # POINT-TO-POINT THRESHOLDS
-# Refreshed for the Wang et al. 2019 Eq. 12 CV excess-noise model (see
-# sens_common.py). The previous values (23 / 40 / 275) came from the superseded
-# xi_bob/(T*eta) parameterisation and must not be reused.
+# Refreshed for the Wang et al. 2019 Eq. 12 CV excess-noise model AND the
+# Clason-anchored DV baseline with a 2.0 dB receiver loss budget (see
+# sens_common.py). Superseded value sets (23/40/275 and 50/94.4/279.1) must not
+# be reused.
 # ============================================================
-CROSSOVER_KM = 50.0    # CV wins (bits/channel use) below this, DV above.
-                       # SOFT: 27.2 km at beta=0.90, 56.8 km at beta=0.96, so the
-                       # deployed beta band alone spans 27-57 km. Quote as a range,
-                       # not a point. This value is the beta=0.95 case.
+CROSSOVER_KM = 59.0    # CV wins (bits/channel use) below this, DV above.
+                       # SOFT: moves with CV beta and with the DV receiver loss
+                       # budget (26 km at 0 dB RX loss, 71 km at 3 dB). Quote as
+                       # a range, not a point. This is the 2.0 dB / beta=0.95 case.
 # NB these are ZERO-RATE distances: the point at which the key rate reaches
 # zero. They are NOT the usable reach under the 1 kbit/s reachability floor —
 # for that use span_km(protocol, 'reach'), which is shorter. Kept for reference
 # and for the plotting/annotation call sites that want the asymptotic limit.
 CV_REACH_KM  = 94.4    # CV hits zero here (agrees with the 100 km / 20 dB spec of
                        # the LuxQuanta NOVA LQ Gen-2 commercial CV-QKD system)
-DV_REACH_KM  = 279.1   # DV hits zero here
+DV_REACH_KM  = 303.4   # DV hits zero here
 
 DETOUR = 1.0           # 1.0 = Euclidean (stated simplification); ~1.5 = real fibre
 
@@ -260,52 +261,32 @@ def pair_rates(users, protocol):
     return dists, rates
 
 
-# ============================================================
+## ============================================================
 # REACHABILITY — the single definition of "this link carries a key"
 # ============================================================
-# A link/pair counts as REACHABLE if its secret key rate is at least
-# REACHABLE_BPS bits per second. One definition, used by every script, so that
-# coverage figures across the suite mean the same thing.
+# A link counts as REACHABLE if SKR >= REACHABLE_BPS. One definition, used
+# everywhere, so coverage figures across the suite mean the same thing.
 #
-# WHY 1 kbps, AND NOT ZERO. The engines are asymptotic: they return a positive
-# rate right down to the rate-distance limit, including rates of a few bits per
-# second that no finite-size analysis would certify and no operator would field.
-# A non-zero floor is therefore the honest reading of "works". 1 kbps sits below
-# every deployed system found in the literature, so it cannot be accused of
-# defining working links out of existence, while excluding rates that exist only
-# in the asymptotic limit:
+# WHY 1 kbps, NOT ZERO. The engines are asymptotic and return positive rates
+# down to the rate-distance limit, including a few bits/s that no finite-size
+# analysis would certify. A non-zero floor is the honest reading of "works".
+# 1 kbps sits below every deployed system in the literature:
+#   - CN-QCN backbone: 9.75-360 kbps across 64 links over 10 weeks (npj QI 11, 2025)
+#   - Tokyo metro: 2.8-141 kbps; Shanghai CV metro: 0.25-10 kbps (ACM CSUR 53, 2020)
+#   - Application demand: 7.4 kbps for quantum-safe IPsec at 46 km (arXiv:2405.04415);
+#     DCI trial 2.392 kbps (arXiv:2410.10245). At 1 kbps ~4 fresh AES-256 keys/s.
+#   - Finite-size: no key from fewer than ~10^5-10^6 signals (Scarani, arXiv:1010.0521);
+#     Wang 2019 shows finite-size reach ~200 km vs asymptotic ~500 km.
 #
-#   - Deployed backbone. On China's CN-QCN backbone, across the 64 links between
-#     Harbin and Shenzhen, the lowest secure key rate measured over ten weeks was
-#     9.75 kbps and the highest 359.89 kbps (Nature npj QI 11, 2025). Our floor
-#     is an order of magnitude below the weakest carrier-grade link.
-#   - Deployed metro. The Tokyo QKD network's links ran between 2.8 and 141 kbps,
-#     with one commercial SARG04 link peaking at 1.5 kbps; the Shanghai CV metro
-#     network ran 0.25-10 kbps (ACM CSUR 53, 2020).
-#   - Application demand. A 100 Gbps quantum-safe IPsec deployment over 46 km
-#     sustained 45 days on an average 7.4 kbps, about 29 AES-256 keys per second
-#     (arXiv:2405.04415); a data-centre interconnect trial ran on 2.392 kbps
-#     (arXiv:2410.10245). At 1 kbps a fresh 256-bit key is available roughly four
-#     times a second, so the floor still supports frequent rekeying.
-#   - Finite-size theory. No secret key can be extracted from fewer than about
-#     10^5-10^6 processed signals per run (Scarani, arXiv:1010.0521), and Wang
-#     et al. (Opt. Express 27, 13372, 2019) show the finite-size rate-distance
-#     limit is far tighter than the asymptotic one — roughly 200 km against 500
-#     km even at 10^12 samples. Our engines model none of this, so a rate floor
-#     stands in, approximately, for a penalty the calculation omits.
-#
-# ASYMMETRY, AND ITS SIZE. Any positive floor costs DV more than CV, because
-# under Wang Eq. 12 the referred excess noise carries a 1/(eta*T) term: near its
-# limit CV's rate falls through several decades within about a kilometre, while
-# DV's tail decays gently. But the effect is small. Measured, the floor moves
-# DV's usable reach from 279.1 km (zero-rate) to about 265 km — roughly 5%. Do
-# not present it as a large correction; if anything it is reassuring, since the
-# conclusions then do not hinge on where the floor is set. Verify the CV figure
-# on the real engines before quoting it. Sensitivity runs:
-#     QKD_REACHABLE_BPS=256  ... one AES-256 key per second
-#     QKD_REACHABLE_BPS=1e3  ... default
-#     QKD_REACHABLE_BPS=1e4  ... carrier-grade deployed floor
-REACHABLE_BPS = float(os.environ.get("QKD_REACHABLE_BPS", 1e3))
+# ASYMMETRY. A positive floor costs DV more than CV (Wang Eq. 12's 1/(eta*T)
+# makes CV's rate fall vertically at its limit while DV's tail decays gently),
+# but the effect is small: DV reach moves ~279.1 km -> ~265 km. Not a large
+# correction. Sensitivity runs:
+#     QKD_REACHABLE_BPS=256    # one AES-256 key/s
+#     QKD_REACHABLE_BPS=1e3    # default
+#     QKD_REACHABLE_BPS=1e4    # carrier-grade
+
+REACHABLE_BPS = float(os.environ.get("QKD_REACHABLE_BPS", 256))
 
 
 def reachable_threshold(protocol):

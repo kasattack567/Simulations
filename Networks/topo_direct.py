@@ -176,13 +176,24 @@ def main():
                framealpha=0.9, borderaxespad=0.4)
 
     # ---- right: average pair rate, bits/s at the matched 1 GHz clock.
-    # Log axis: a zero average cannot be drawn, so it is clamped to the floor
-    # below and shows as an absent bar. Absent = zero, not missing data.
+    # Zeros are passed through as zeros. A zero-height bar does not render on a
+    # log axis, so a topology with no reachable pair shows as an empty slot and
+    # is annotated "0" below. The previous version clamped zeros to 1e-20, which
+    # both stretched the axis over twenty empty decades and drew stub bars that
+    # read as very small rates rather than as absent ones.
     wr = 0.35
+    vals = {p: np.asarray(_col(p, "avg_pair_rate_bps"), float) for p in PROTOS}
     for i, proto in enumerate(PROTOS):
-        axR.bar(x + (i - 0.5) * wr, np.maximum(_col(proto, "avg_pair_rate_bps"), 1e-20),
-                wr, color=PROTO_COLOR[proto], label=PROTO_LABEL[proto], alpha=0.85)
+        axR.bar(x + (i - 0.5) * wr, vals[proto], wr,
+                color=PROTO_COLOR[proto], label=PROTO_LABEL[proto], alpha=0.85)
     axR.set_yscale("log")
+    pos = np.concatenate([v[v > 0] for v in vals.values()])
+    if pos.size:
+        axR.set_ylim(pos.min() / 5, pos.max() * 5)
+        for k in range(len(names)):
+            if all(vals[p][k] == 0 for p in PROTOS):
+                axR.text(k, pos.min() / 4, "0", ha="center", va="bottom",
+                         fontsize=9, color="0.4")
     axR.set_ylabel("Average key rate per pair (bits / s)")
     axR.set_title("Key rate: average over all pairs")
     axR.grid(True, alpha=0.3, axis="y", which="both")
