@@ -12,7 +12,9 @@ average key rate (over ALL pairs, failed links = 0) is averaged across them.
 The +/- 1 std band reflects run-to-run variation in random placement (the
 engine itself is deterministic).
 
-y-axis: average key rate per user pair (bits / channel use).
+y-axis: average key rate per user pair (bits / s). Rates come out of the
+engines per channel use and are converted with net_common.to_bps at the
+protocol's clock; DV and CV are both clocked at 1 GHz (matched).
 
 Usage:
     python network_users.py
@@ -23,7 +25,8 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 
-from net_common import place_users, all_pairs, pair_distance_km, link_rate
+from net_common import (place_users, all_pairs, pair_distance_km, link_rate,
+                        to_bps, is_reachable)
 
 PROTOCOLS = [("dv", "DV — decoy BB84", "#1f4e9c", "-o"),
              ("cv_het", "CV — heterodyne", "#c0392b", "-s"),
@@ -31,7 +34,7 @@ PROTOCOLS = [("dv", "DV — decoy BB84", "#1f4e9c", "-o"),
 
 
 def avg_rate_all_pairs(users, protocol):
-    """Average key rate over ALL pairs (failed links count as zero)."""
+    """Average key rate in BITS/S over ALL pairs (failed links count as zero)."""
     n = len(users)
     n_pairs = n * (n - 1) // 2
     if n_pairs == 0:
@@ -39,9 +42,9 @@ def avg_rate_all_pairs(users, protocol):
     total = 0.0
     for i, j in all_pairs(n):
         r = link_rate(pair_distance_km(users, i, j), protocol)
-        if r > 1e-9:
+        if is_reachable(r, protocol):
             total += r
-    return total / n_pairs
+    return to_bps(total / n_pairs, protocol)
 
 
 def main():
@@ -87,7 +90,7 @@ def main():
         ax.fill_between(x, np.maximum(m - s, 1e-12), m + s, color=color, alpha=0.15)
 
     ax.set_xlabel("Number of users in the network")
-    ax.set_ylabel("Average key rate per pair  (bits / channel use)")
+    ax.set_ylabel("Average key rate per pair  (bits / s)")
     ax.set_yscale("log")
     ax.set_title(f"DV vs CV — average key rate vs network size "
                  f"(fixed {args.area:.0f}x{args.area:.0f} km metro area)",
